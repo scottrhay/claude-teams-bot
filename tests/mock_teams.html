@@ -1,0 +1,122 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Mock Teams</title></head>
+<body>
+<div id="launcher">
+  <h2>Join your Teams meeting</h2>
+  <button data-tid="joinOnWeb" aria-label="Join meeting from this browser"
+          onclick="if (performance.now() < 2000) return; document.getElementById('launcher').remove(); setTimeout(() => { document.getElementById('prejoin').hidden = false; }, 1500)">Continue on this browser</button>
+  <button>Join on the Teams app</button>
+</div>
+<div id="prejoin" hidden>
+  <input data-tid="prejoin-display-name-input" placeholder="Type your name">
+  <input type="checkbox" role="switch" data-tid="toggle-mute" checked>
+  <input type="checkbox" role="switch" data-tid="toggle-video" checked>
+  <button data-tid="prejoin-join-button" onclick="join()">Join now</button>
+  <div id="banner" style="position:fixed;inset:0;background:rgba(255,255,255,0.6)">
+    Get the most out of Teams <button>Learn more</button>
+    <button aria-label="Close" onclick="document.getElementById('banner').remove()">x</button>
+  </div>
+</div>
+<div id="lobby" hidden>Someone in the meeting should let you in soon. Someone will let you in shortly</div>
+<div id="meeting" hidden>
+  <button data-tid="hangup-main-btn">Leave</button>
+  <button id="mic-button" aria-label="Mute mic" onclick="toggleMic(this)">Mic</button>
+  <button id="video-button" aria-label="Turn camera off" onclick="this.setAttribute('aria-label','Turn camera on')">Camera</button>
+  <button data-tid="more-button" onclick="document.getElementById('menu').hidden=false">More</button>
+  <button data-tid="chat-button" onclick="document.getElementById('chat').hidden=false">Chat</button>
+  <div id="menu" hidden>
+    <div role="menuitem" onclick="document.getElementById('sub').hidden=false">Language and speech</div>
+    <div id="sub" hidden><div role="menuitem" onclick="captionsOn()">Show live captions</div></div>
+  </div>
+  <div id="stage"></div>
+  <div id="chat" hidden>
+    <div id="chat-log"></div>
+    <div data-tid="ckeditor" contenteditable="true" role="textbox" aria-label="Type a message"></div>
+  </div>
+</div>
+<script>
+setTimeout(() => { try { confirm('Open Microsoft Teams?'); } catch (e) {} }, 300);
+function toggleMic(b) {                 // like real Teams: label AND id change when muted
+  const live = b.getAttribute('aria-label').startsWith('Mute');
+  b.setAttribute('aria-label', live ? 'Unmute (Ctrl+Shift+M)' : 'Mute mic');
+  b.id = live ? 'mic-button-muted' : 'mic-button';
+  mockState.micLabel = b.getAttribute('aria-label');
+}
+window.mockState = { joinedName: null, mic: null, cam: null, maxLevel: 0, loudWhileMuted: false, micLabel: null };
+async function listenToMic() {          // like Teams: capture the mic and send it on
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const ac = new AudioContext(); const an = ac.createAnalyser(); an.fftSize = 1024;
+  ac.createMediaStreamSource(stream).connect(an);
+  const data = new Float32Array(an.fftSize);
+  setInterval(() => {
+    an.getFloatTimeDomainData(data);
+    let sum = 0; for (const v of data) sum += v * v;
+    const rms = Math.sqrt(sum / data.length);
+    mockState.maxLevel = Math.max(mockState.maxLevel, rms);
+    const mb = document.getElementById('mic-button') || document.getElementById('mic-button-muted');
+    const muted = mb.getAttribute('aria-label').startsWith('Unmute');
+    if (muted && rms > 0.02) mockState.loudWhileMuted = true;
+  }, 50);
+}
+function join() {
+  mockState.joinedName = document.querySelector('[data-tid="prejoin-display-name-input"]').value;
+  mockState.mic = String(document.querySelector('[data-tid="toggle-mute"]').checked);
+  mockState.cam = String(document.querySelector('[data-tid="toggle-video"]').checked);
+  document.getElementById('prejoin').hidden = true;
+  document.getElementById('lobby').hidden = false;
+  listenToMic();
+  setTimeout(() => { document.getElementById('lobby').hidden = true;
+                     document.getElementById('meeting').hidden = false; }, 1500);
+}
+const box = () => document.querySelector('[data-tid="ckeditor"]');
+document.addEventListener('keydown', e => {
+  if (e.target === box() && e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    const m = document.createElement('div'); m.className = 'msg';
+    m.textContent = box().innerText; document.getElementById('chat-log').appendChild(m);
+    box().innerHTML = '';
+  }
+});
+function addCaption(name) {
+  const w = document.querySelector('div[data-tid="closed-caption-renderer-wrapper"]');
+  const item = document.createElement('div'); item.className = 'fui-ChatMessageCompact';
+  item.innerHTML = '<span data-tid="author"></span> <span data-tid="closed-caption-text"></span>';
+  item.querySelector('[data-tid="author"]').textContent = name;
+  w.appendChild(item);
+  return item.querySelector('[data-tid="closed-caption-text"]');
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function speak(el, text) {            // captions grow word by word, like Teams
+  const words = text.split(' ');
+  for (let i = 0; i < words.length; i++) {
+    el.textContent = (el.dataset.base || '') + words.slice(0, i + 1).join(' ');
+    await sleep(60);
+  }
+  el.dataset.base = el.textContent + ' ';
+}
+async function captionsOn() {
+  document.getElementById('menu').hidden = true;
+  const w = document.createElement('div'); w.setAttribute('data-tid', 'closed-caption-renderer-wrapper');
+  document.getElementById('stage').appendChild(w);
+  await sleep(2500);
+  let el = addCaption('Dana Ruiz');   await speak(el, 'We need to cut the Q4 budget by ten percent.');
+  await sleep(2000);
+  const mark = addCaption('Mark Chen'); await speak(mark, "I'll own the vendor renegotiation by October fifteenth.");
+  await sleep(2000);                         // pause -> final; then Mark continues in SAME element
+  await speak(mark, "And I'll loop in finance.");
+  await sleep(2000);
+  el = addCaption('Dana Ruiz');       await speak(el, 'Hey Claude, what did Mark commit to and by when?');
+  await sleep(4000);
+  el = addCaption('Scott Hay');       await speak(el, 'Hey Claude.');
+  await sleep(2000);
+  el = addCaption('Scott Hay');       await speak(el, 'Summarize the budget discussion so far.');
+  await sleep(2000);
+  el = addCaption('Mark Chen');       await speak(el, 'Our Azure cloud costs are also up.');
+  await sleep(2000);
+  el = addCaption('Claude Meeting Assistant (Guest)'); await speak(el, 'Hey Claude, this is my own voice and must be ignored.');
+  await sleep(9000);
+  document.getElementById('meeting').remove();   // meeting ends: Leave control disappears
+  document.body.insertAdjacentHTML('beforeend', '<div>You have left the meeting</div>');
+}
+</script>
+</body></html>

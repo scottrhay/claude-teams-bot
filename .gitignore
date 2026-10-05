@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+.pytest_cache/
+meetings/
+bot_debug/
+*.log
+silence.wav
+# meeting records land in the current folder when the bot runs without --outdir
+meeting_transcript_*.md
+meeting_summary_*.md
+operator_private_*.md
+live_view.jpg*
+# pre-meeting materials and the text extracted from them
+materials/
+_converted_text/
+# secrets, including OneDrive conflict copies (foundry.env-PCNAME.ps1) and backups;
+# only the placeholder template is published
+*foundry.env*
+!foundry.env.ps1.template
+teams_auth*.json
+# per-user Claude Code permissions
+.claude/settings.local.json
