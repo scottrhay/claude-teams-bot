@@ -231,6 +231,13 @@ def chat_text(text):
     return text.strip()
 
 
+def join_notice(voice):
+    """The chat notice posted on joining. It mentions "out loud" only when the bot can speak."""
+    notice = ("Claude meeting assistant has joined and is reading Teams live captions to keep a "
+              "transcript. Ask a question by saying \"Hey Claude, ...\" - answers post here.")
+    return notice if voice == "off" else notice + " Add \"out loud\" to hear the answer spoken."
+
+
 OFFICE_EXT = (".docx", ".pptx", ".xlsx")
 CONVERT_EXT = OFFICE_EXT + (".pdf",)
 TEXT_DIR = "_converted_text"
@@ -1516,10 +1523,7 @@ class MeetingBot:
         log(f"Agent: {self.agent.describe() if self.agent else 'off (transcript-only answers)'}")
         log(f"Voice: {self.voice_mode} ({self.a.voice_name})")
         if self.a.intro and not self.a.console_only:
-            await self.post_chat(
-                "Claude meeting assistant has joined and is reading Teams live captions to "
-                "keep a transcript. Ask a question by saying \"Hey Claude, ...\" - answers post here. "
-                "Add \"out loud\" to hear the answer spoken.")
+            await self.post_chat(join_notice(self.voice_mode))
 
         self.listening = True
         tasks = early + [asyncio.create_task(t) for t in (self.finalizer(), self.watch_end())]

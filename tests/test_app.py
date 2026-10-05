@@ -86,8 +86,7 @@ def test_gui_end_to_end(tmp_path):
             st.append("started")
         elif "listening" not in st and "listening" in a.status.get().lower():
             st.append("listening")
-            a.ask_text.set("In one short sentence, who has spoken so far?")
-            a.send_private()
+            a.send("In one short sentence, who has spoken so far?")      # a console question
         elif "listening" in st and "answered" not in st and "CLAUDE:" in txt:
             st.append("answered")
         elif "answered" in st and "viewed" not in st and a.layout:
@@ -197,10 +196,30 @@ def test_knowledge_folder_messages_show_in_activity(tmp_path, make_pdf, capsys):
     assert kinds == ["event", "detail", "detail", "warn", "event"]
 
 
+SPEECH_VARS = ("SPEECH_RESOURCE", "SPEECH_ENDPOINT", "SPEECH_KEY", "ANTHROPIC_FOUNDRY_API_KEY")
+
+
+def hermetic(tmp_path, monkeypatch):
+    """Settings and foundry.env.ps1 in a temp folder, and no Speech variables in the environment:
+    Azure Speech counts as not set up until a test calls speech_set_up()."""
+    monkeypatch.setattr(app, "SETTINGS", str(tmp_path / "settings.json"))
+    monkeypatch.setattr(app, "ENV_FILE", str(tmp_path / "foundry.env.ps1"))
+    for var in SPEECH_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+
+def speech_set_up(tmp_path):
+    """An explicit Speech resource; the key comes from Foundry. The key is <placeholder>-shaped so
+    the pre-push secret check (CLAUDE.md, Publishing) stays silent."""
+    (tmp_path / "foundry.env.ps1").write_text('$env:SPEECH_RESOURCE = "speech-1"\n'
+                                              '$env:ANTHROPIC_FOUNDRY_API_KEY = "<test-key>"\n',
+                                              encoding="utf-8")
+
+
 @pytest.fixture
 def gui(tmp_path, monkeypatch):
-    """The real window, hidden, with settings in a temp file. No bot process is started."""
-    monkeypatch.setattr(app, "SETTINGS", str(tmp_path / "settings.json"))
+    """The real window, hidden (see hermetic()). No bot process is started."""
+    hermetic(tmp_path, monkeypatch)
     try:
         root = new_root()
     except tk.TclError as e:                          # e.g. Linux CI without $DISPLAY
@@ -267,12 +286,12 @@ def test_setup_form_validates_inline_and_collapses_while_running(gui, tmp_path):
     a.kb.set(str(tmp_path / "missing"))
     assert a.validate() is None and str(a.kb_entry.cget("style")) == "Invalid.TEntry"
     a.kb.set(str(tmp_path))
-    assert a.validate() == (link, app.DEFAULT_NAME, str(tmp_path), "asked")
+    assert a.validate() == (link, app.DEFAULT_NAME, str(tmp_path), "off")         # no Azure Speech here
 
     a.set_running(True)                                              # a meeting: summary + Leave
     assert a.summary_row.grid_info() and not a.setup_body.grid_info()
     assert a.summary_values["Meeting"].cget("text") == "teams.microsoft.com/meet/2401987654…"
-    assert str(a.leave_btn.cget("state")) == "normal" and str(a.ask_entry.cget("state")) == "normal"
+    assert str(a.leave_btn.cget("state")) == "normal" and str(a.view_entry.cget("state")) == "normal"
     a.set_running(False)
     a.set_running(True, mode="check")                                # a setup check keeps the form
     assert a.setup_body.grid_info() and str(a.leave_btn.cget("state")) == "disabled"
@@ -300,10 +319,99 @@ def test_bot_name_has_no_reset_button(gui, tmp_path):
     assert gui.validate()[1] == app.DEFAULT_NAME
 
 
+def test_no_ask_claude_box(gui):
+    """The operator follows the meeting in Activity. Private questions and /speak stay at the
+    bot's console (run.ps1)."""
+    assert not set(widget_texts(gui.root)) & {"Ask Claude", "Ask privately", "Say out loud"}
+
+
+def test_speech_counts_as_set_up_only_when_configured_explicitly():
+    foundry = {"ANTHROPIC_FOUNDRY_RESOURCE": "res", "ANTHROPIC_FOUNDRY_API_KEY": "k"}
+    assert not app.speech_ready(foundry)                     # the bot's Foundry fallback doesn't count
+    assert app.speech_ready(dict(foundry, SPEECH_RESOURCE="res"))            # key from Foundry
+    assert app.speech_ready({"SPEECH_ENDPOINT": "https://x/tts", "SPEECH_KEY": "k"})
+    assert not app.speech_ready({"SPEECH_RESOURCE": "res"})                  # no key anywhere
+
+
+def test_saved_voice_choice_carries_over():
+    assert app.speech_settings({}) == (True, "asked")                         # once Speech is set up
+    assert app.speech_settings({"voice": "Off"}) == (False, "asked")          # older versions' labels
+    assert app.speech_settings({"voice": "Always"}) == (True, "always")
+    assert app.speech_settings({"speech": False, "speech_mode": "always"}) == (False, "always")
+
+
+def test_bot_name_and_speech_live_in_advanced_settings(gui):
+    assert not set(widget_texts(gui.root)) & {"Bot name", "Speak answers"}   # not on the form
+    gui.gear.invoke()
+    d = gui.settings_dialog
+    assert d.win.title() == "Advanced settings"
+    assert {"Bot name", "Speak answers in the meeting"} <= set(widget_texts(d.win))
+    d.cancel()
+
+
+def test_advanced_settings_save_applies_and_cancel_discards(gui, tmp_path):
+    a = gui
+    speech_set_up(tmp_path)
+    a.gear.invoke()
+    d = a.settings_dialog
+    d.name.set("Board Assistant (v2)")
+    d.mode.set("always")
+    d.save()
+    assert not d.win.winfo_exists()
+    assert a.header_name.cget("text") == "Board Assistant v2"
+    saved = app.load_settings()
+    assert (saved["name"], saved["speech"], saved["speech_mode"]) == ("Board Assistant v2", True, "always")
+    assert a.voice_mode() == "always"
+    a.gear.invoke()
+    d = a.settings_dialog
+    d.name.set("Someone else")
+    d.speech.set(False)
+    d.cancel()
+    assert a.bot_name() == "Board Assistant v2" and a.voice_mode() == "always"
+
+
+def test_speech_is_greyed_out_until_azure_speech_is_set_up(gui, tmp_path, monkeypatch):
+    a = gui
+    a.gear.invoke()
+    d = a.settings_dialog
+    assert d.speech_check.instate(["disabled"]) and all(b.instate(["disabled"]) for b in d.mode_buttons)
+    assert app.SPEECH_MISSING in set(widget_texts(d.win))
+    d.save()
+    assert "speech" not in app.load_settings()             # the operator's choice waits for Speech
+    launched = []
+    monkeypatch.setattr(a, "launch", lambda cmd, mode="meeting": launched.append(cmd))
+    a.check()
+    assert launched[0][launched[0].index("--voice") + 1] == "off"         # so Check skips speech
+    speech_set_up(tmp_path)                                # an admin sets Speech up: it lights up
+    a.gear.invoke()
+    d = a.settings_dialog
+    assert not d.speech_check.instate(["disabled"]) and d.speech.get()    # default: on, When asked
+    assert a.voice_mode() == "asked"
+    d.cancel()
+
+
+def test_gear_is_disabled_while_the_bot_runs(gui):
+    gui.set_running(True)
+    assert gui.gear.instate(["disabled"])
+    gui.set_running(False)
+    assert not gui.gear.instate(["disabled"])
+
+
+def test_header_shows_the_bot_name_and_the_title_bar_the_app_name(gui):
+    a = gui
+    assert a.root.title() == app.APP_NAME
+    assert app.APP_NAME not in set(widget_texts(a.root))             # the app name shows once
+    assert a.header_name.cget("text") == app.DEFAULT_NAME
+    a.name.set("Board Assistant (v2)")
+    assert a.header_name.cget("text") == "Board Assistant v2"         # as the bot will join
+    a.name.set("   ")
+    assert a.header_name.cget("text") == app.DEFAULT_NAME             # an empty name joins as this
+
+
 def test_meeting_always_runs_in_the_meeting_view(tmp_path, monkeypatch):
     """The bot's browser runs off-screen and shows in the Meeting view; run.ps1 is the
     real-window path. A show_window setting saved by an older version is ignored."""
-    monkeypatch.setattr(app, "SETTINGS", str(tmp_path / "settings.json"))
+    hermetic(tmp_path, monkeypatch)
     app.save_settings({"show_window": True})
     try:
         root = new_root()

@@ -252,6 +252,11 @@ def test_voice_modes(tmp_path):
     assert bot.a.name == "Claude Meeting Assistant"
 
 
+def test_join_notice_mentions_out_loud_only_when_the_bot_can_speak():
+    assert tb.join_notice("asked").endswith('Add "out loud" to hear the answer spoken.')
+    assert tb.join_notice("off").endswith("answers post here.") and "out loud" not in tb.join_notice("off")
+
+
 def test_azure_tts_request(monkeypatch):
     seen = {}
 
@@ -343,7 +348,7 @@ def test_repeat_speaks_last_answer_without_agent(tmp_path):
     assert "turned off" in chat[0] and len(spoken) == 1
 
 
-# "Ask privately" (app) / plain console text: the operator's question and its answer.
+# Plain console text: the operator's private question and its answer.
 PRIVATE_Q, PRIVATE_A = "What is our walk-away price for Northwind?", "Walk away above 1.2 million."
 REPLIES = [PRIVATE_A,                                       # private answer
            "Legal is reviewing the Northwind contract.",    # public answer

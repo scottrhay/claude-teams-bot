@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Claude-Teams-Bot - Windows desktop app for the Claude Teams meeting bot.
 
-Control tab: meeting link, bot name (pre-filled), knowledge folder (the files the bot is
-grounded in) and voice mode; Join meeting / Check setup; a live activity feed of what the
-bot hears and answers; and a box to ask Claude privately or have it say something out loud.
+Control tab: meeting link and knowledge folder (the files the bot is grounded in); Join
+meeting / Check setup; and a live activity feed of what the bot hears and answers.
 Meeting view tab: the bot's browser, live - click and type into it when a step needs a hand.
+Advanced settings (the header's gear): the bot's name, and speech once Azure Speech is set up.
 Colours, fonts and widget styles live in app_style.py.
 
 Launch: double-click the "Claude-Teams-Bot" desktop shortcut (created by
@@ -33,20 +33,22 @@ except Exception:                                    # view tab shows a hint ins
 APP_NAME = "Claude-Teams-Bot"
 HERE = os.path.dirname(os.path.abspath(__file__))
 BOT = os.path.join(HERE, "teams_meeting_bot.py")
+ENV_FILE = os.path.join(HERE, "foundry.env.ps1")
 DEFAULT_NAME = "Claude Meeting Assistant"
 DEFAULT_KB = os.path.join(HERE, "agent", "project")
 SETTINGS = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "Claude-Teams-Bot",
                         "settings.json")
-VOICE_CHOICES = {"When asked (\"out loud\")": "asked", "Always": "always", "Off": "off"}
-VOICE_SEGMENTS = (("When asked", "When asked (\"out loud\")"), ("Always", "Always"), ("Off", "Off"))
+SPEECH_MODES = (("When asked", "asked"), ("Always", "always"))
+VOICE_LABELS = {"asked": "When asked", "always": "Always", "off": "Off"}
+OLD_VOICE = {"When asked (\"out loud\")": "asked", "Always": "always", "Off": "off"}   # saved by older versions
 VOICE_HELP = {"asked": "Speaks an answer only when the question says “out loud”.",
               "always": "Speaks every answer in the meeting, as well as posting it in the chat.",
               "off": "Answers go to the meeting chat only."}
+SPEECH_MISSING = "Azure Speech isn't set up on this PC, so answers go to the chat only."
+NAME_HELP = ("How the bot appears when it joins as a guest. Signed in as its own account, it shows that "
+             "account's name instead. Letters, numbers, spaces and - ' . _ @")
 LINK_HELP = "Paste the Teams join link. It starts with https://teams.microsoft.com/"
 KB_HELP = "This meeting’s agenda, briefs and decks (PDF, Word, PowerPoint, Excel, text). Claude cites them."
-ASK_HELP_IDLE = "Available once the bot is in the meeting."
-ASK_HELP_LIVE = ("Ask privately: only you see the answer.   Say out loud: Claude speaks your text, "
-                 "word for word, in the meeting.")
 VIEW_HINT = "The bot’s browser, live. Click in the picture to click in the meeting, or type below."
 TEAMS_LINK = re.compile(r"^https://teams\.(microsoft\.com|cloud\.microsoft|live\.com)/\S+$", re.I)
 NAME_BAD_CHARS = re.compile(r"[^A-Za-z0-9 \-'._@]")
@@ -239,6 +241,22 @@ def save_settings(data):
         pass
 
 
+def speech_ready(env):
+    """Azure Speech counts as set up only when it is configured explicitly (SPEECH_RESOURCE or
+    SPEECH_ENDPOINT), not through the bot's fallback to the Foundry resource. The key may come
+    from either."""
+    return bool((env.get("SPEECH_RESOURCE") or env.get("SPEECH_ENDPOINT"))
+                and (env.get("SPEECH_KEY") or env.get("ANTHROPIC_FOUNDRY_API_KEY")))
+
+
+def speech_settings(s):
+    """(speech on, "asked" or "always") from saved settings. Versions before Advanced settings
+    saved one voice label, Off included, under "voice"."""
+    old = OLD_VOICE.get(s.get("voice"))
+    mode = s.get("speech_mode", old)
+    return bool(s.get("speech", old != "off")), mode if mode in ("asked", "always") else "asked"
+
+
 class App:
     def __init__(self, root, python=None):
         self.root, self.python = root, python
@@ -260,10 +278,10 @@ class App:
         self.link = tk.StringVar(value=s.get("link", ""))
         self.name = tk.StringVar(value=s.get("name", DEFAULT_NAME))
         self.kb = tk.StringVar(value=s.get("kb", DEFAULT_KB))
-        voice = s.get("voice")
-        self.voice = tk.StringVar(value=voice if voice in VOICE_CHOICES else next(iter(VOICE_CHOICES)))
+        on, mode = speech_settings(s)
+        self.speech = tk.BooleanVar(value=on)        # the operator's choice; needs Azure Speech
+        self.speech_mode = tk.StringVar(value=mode)
         self.status = tk.StringVar(value="Ready")
-        self.ask_text = tk.StringVar()
         self.show_details = tk.BooleanVar(value=s.get("show_details", False))
         self.type_text = tk.StringVar()
         self.frame_mtime = 0
@@ -273,6 +291,7 @@ class App:
         self.feed_empty = True
         self.view_placeholder = False
         self.banner_info = None                      # (what to do, where) while a step needs a hand
+        self.settings_dialog = None
         self._build()
         self.set_status("Ready", "idle")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -306,7 +325,10 @@ class App:
         self.logo = icon_image(os.path.join(HERE, "claude_teams_bot.ico"), px(26))
         if self.logo:
             ttk.Label(bar, image=self.logo, style="Header.TLabel").grid(row=0, column=0, padx=(0, px(10)))
-        ttk.Label(bar, text=APP_NAME, style="Title.Header.TLabel").grid(row=0, column=1, sticky="w")
+        # The title bar already says Claude-Teams-Bot; the header names the bot in the meeting.
+        self.header_name = ttk.Label(bar, text=self.bot_name(), style="Title.Header.TLabel")
+        self.header_name.grid(row=0, column=1, sticky="w")
+        self.name.trace_add("write", lambda *a: self.header_name.configure(text=self.bot_name()))
         tabs = ttk.Frame(bar, style="Header.TFrame")
         tabs.grid(row=0, column=2, sticky="sw", padx=(px(32), 0))
         self.tab_choice = tk.IntVar(value=0)
@@ -319,6 +341,8 @@ class App:
             self.tab_marks.append(mark)
         self.pill = StatusPill(bar, self.theme)
         self.pill.grid(row=0, column=4, sticky="e", pady=px(12))
+        self.gear = ttk.Button(bar, text=self.f.gear, style="Icon.TButton", command=self.open_settings)
+        self.gear.grid(row=0, column=5, padx=(px(8), 0))
 
     def _build_banner(self):
         px = self.px
@@ -351,8 +375,7 @@ class App:
         page.columnconfigure(0, weight=1)
         page.rowconfigure(1, weight=1)
         self._build_setup(self.card(page, 0, pady=(0, px(12))))
-        self._build_feed(self.card(page, 1, pady=(0, px(12)), pad=(18, 12)))
-        self._build_composer(self.card(page, 2))
+        self._build_feed(self.card(page, 1, pad=(18, 12)))
 
     def _build_setup(self, c):
         px = self.px
@@ -380,35 +403,20 @@ class App:
 
         self.link_entry = field(0, "Meeting link", self.link)
         self.link_help = help_text(1, LINK_HELP)
-        self.name_entry = field(2, "Bot name", self.name)
-        help_text(3, "How the bot appears in the meeting. Letters, numbers, spaces and - ' . _ @")
         self.browse_btn = ttk.Button(body, text="Browse\u2026", command=self.browse)
-        self.kb_entry = field(4, "Knowledge folder", self.kb, self.browse_btn)
-        self.kb_help = help_text(5, KB_HELP)
+        self.kb_entry = field(2, "Knowledge folder", self.kb, self.browse_btn)
+        self.kb_help = help_text(3, KB_HELP)
         self.link.trace_add("write", lambda *a: self.clear_error(self.link_help, self.link_entry, LINK_HELP))
         self.kb.trace_add("write", lambda *a: self.clear_error(self.kb_help, self.kb_entry, KB_HELP))
 
-        ttk.Label(body, text="Speak answers", style="Field.Card.TLabel").grid(row=6, column=0, sticky="w")
-        seg = tk.Frame(body, bg=BORDER_STRONG)       # shows through 1px gaps: outline + dividers
-        seg.grid(row=6, column=1, sticky="w")
-        self.voice_buttons = []
-        for i, (text, value) in enumerate(VOICE_SEGMENTS):
-            b = ttk.Radiobutton(seg, text=text, value=value, variable=self.voice,
-                                style="Segment.TRadiobutton", command=self.voice_changed)
-            b.grid(row=0, column=i, padx=(1, 1 if i == len(VOICE_SEGMENTS) - 1 else 0), pady=1)
-            self.voice_buttons.append(b)
-        self.voice_help = help_text(7, "")
-        self.voice_changed()
-
         actions = ttk.Frame(body, style="Card.TFrame")
-        actions.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(px(4), 0))
+        actions.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(px(4), 0))
         actions.columnconfigure(2, weight=1)
         self.join_btn = ttk.Button(actions, text="Join meeting", style="Accent.TButton", command=self.start)
         self.join_btn.grid(row=0, column=0)
         self.check_btn = ttk.Button(actions, text="Check setup", command=self.check)
         self.check_btn.grid(row=0, column=1, padx=(px(8), 0))
-        self.form_inputs = [self.link_entry, self.name_entry, self.kb_entry,
-                            self.browse_btn, *self.voice_buttons]
+        self.form_inputs = [self.link_entry, self.kb_entry, self.browse_btn]
 
         # While a meeting runs, the form collapses to this summary and the Leave button.
         self.summary_row = ttk.Frame(c, style="Card.TFrame")
@@ -506,22 +514,6 @@ class App:
                                "chat and here.\n", ("empty",))
         self.log.configure(state="disabled")
         self.feed_empty = True
-
-    def _build_composer(self, c):
-        px = self.px
-        c.columnconfigure(0, weight=1)
-        ttk.Label(c, text="Ask Claude", style="Section.Card.TLabel").grid(
-            row=0, column=0, columnspan=3, sticky="w", pady=(0, px(8)))
-        self.ask_entry = ttk.Entry(c, textvariable=self.ask_text, state="disabled")
-        self.ask_entry.grid(row=1, column=0, sticky="ew")
-        self.ask_entry.bind("<Return>", lambda e: self.send_private())
-        self.ask_btn = ttk.Button(c, text="Ask privately", style="Accent.TButton",
-                                  command=self.send_private, state="disabled")
-        self.ask_btn.grid(row=1, column=1, padx=(px(8), 0))
-        self.say_btn = ttk.Button(c, text="Say out loud", command=self.send_speak, state="disabled")
-        self.say_btn.grid(row=1, column=2, padx=(px(8), 0))
-        self.ask_help = ttk.Label(c, text=ASK_HELP_IDLE, style="Help.Card.TLabel")
-        self.ask_help.grid(row=2, column=0, columnspan=3, sticky="w", pady=(px(6), 0))
 
     def _build_view(self, v):
         px = self.px
@@ -630,8 +622,11 @@ class App:
         if d:
             self.kb.set(os.path.normpath(d))
 
-    def voice_changed(self):
-        self.voice_help.configure(text=VOICE_HELP[VOICE_CHOICES.get(self.voice.get(), "asked")])
+    def open_settings(self):
+        if self.settings_dialog and self.settings_dialog.win.winfo_exists():
+            self.settings_dialog.win.lift()
+            return
+        self.settings_dialog = SettingsDialog(self)
 
     def details_changed(self):
         at_end = self.log.yview()[1] >= 0.999
@@ -650,26 +645,42 @@ class App:
             help_label.configure(text=text, style="Help.Card.TLabel")
             entry.configure(style="TEntry")
 
+    def bot_name(self):
+        """The name the bot joins under: the Bot name as Teams allows it, or the default."""
+        return clean_name(self.name.get()) or DEFAULT_NAME
+
+    def set_bot_name(self, raw):
+        """Store the Bot name as Teams allows it (empty = the default), saying so if that changed it."""
+        name = clean_name(raw) or DEFAULT_NAME
+        if name != raw.strip():
+            self.append(f"Bot name adjusted to \"{name}\" (Teams allows letters, numbers, "
+                        f"spaces and - ' . _ @ only).", "app")
+        self.name.set(name)
+        return name
+
+    def speech_available(self):
+        return speech_ready(self.env()[0])
+
+    def voice_mode(self):
+        """The bot's --voice: the operator's speech choice, or off while Azure Speech isn't set up."""
+        return self.speech_mode.get() if self.speech.get() and self.speech_available() else "off"
+
     def validate(self):
         link = self.link.get().strip()
         if not TEAMS_LINK.match(link):
             self.field_error(self.link_help, self.link_entry, "That isn't a Teams meeting link. "
                              "Paste the whole link - it starts with https://teams.microsoft.com/")
             return None
-        name = clean_name(self.name.get()) or DEFAULT_NAME
-        if name != self.name.get().strip():
-            self.name.set(name)
-            self.append(f"Bot name adjusted to \"{name}\" (Teams allows letters, numbers, "
-                        f"spaces and - ' . _ @ only).", "app")
+        name = self.set_bot_name(self.name.get())
         kb = self.kb.get().strip()
         if kb and not os.path.isdir(kb):
             self.field_error(self.kb_help, self.kb_entry, f"Folder not found: {kb}")
             return None
-        return link, name, kb, VOICE_CHOICES.get(self.voice.get(), "asked")
+        return link, name, kb, self.voice_mode()
 
     def env(self):
         env = dict(os.environ)
-        env.update(load_env_file(os.path.join(HERE, "foundry.env.ps1")))
+        env.update(load_env_file(ENV_FILE))
         dep = env.get("CLAUDE_FOUNDRY_DEPLOYMENT")
         env["PYTHONIOENCODING"] = "utf-8"
         return env, dep
@@ -698,7 +709,7 @@ class App:
         if not v:
             return
         link, name, kb, voice = v
-        self.remember(link=link, name=name, kb=kb, voice=self.voice.get())
+        self.remember(link=link, name=name, kb=kb)
         self.outdir = os.path.join(HERE, "meetings", dt.datetime.now().strftime("%Y-%m-%d_%H%M"))
         self.append(f"Starting: {name} -> meeting; knowledge folder: {kb or '(none)'}; "
                     f"voice: {voice}", "app")
@@ -710,11 +721,12 @@ class App:
         if self.proc:
             return
         kb = self.kb.get().strip()
-        cmd = [self.python or bot_python(), "-u", BOT, "--check",
-               "--voice", VOICE_CHOICES.get(self.voice.get(), "asked")]
+        voice = self.voice_mode()
+        cmd = [self.python or bot_python(), "-u", BOT, "--check", "--voice", voice]
         if kb and os.path.isdir(kb):
             cmd += ["--project", kb]
-        self.append("Checking setup (browser, model, knowledge folder, MCP, voice)...", "app")
+        self.append("Checking setup (browser, model, knowledge folder, MCP"
+                    + (", voice" if voice != "off" else "") + ")...", "app")
         self.launch(cmd, mode="check")
 
     def send(self, line):
@@ -726,18 +738,6 @@ class App:
             except Exception:
                 pass
         return False
-
-    def send_private(self):
-        q = self.ask_text.get().strip()
-        if q and self.send(q):
-            self.append(f"You (private): {q}", "app")
-            self.ask_text.set("")
-
-    def send_speak(self):
-        t = self.ask_text.get().strip()
-        if t and self.send(f"/speak {t}"):
-            self.append(f"Saying out loud: {t}", "app")
-            self.ask_text.set("")
 
     def confirm_leave(self):
         if messagebox.askyesno(APP_NAME, "Leave the meeting now?\n\nClaude posts a short wrap-up in "
@@ -891,11 +891,10 @@ class App:
 
     def update_summary(self):
         link = re.sub(r"^https?://", "", self.link.get().strip())
-        voice = next((t for t, v in VOICE_SEGMENTS if v == self.voice.get()), "When asked")
         values = {"Meeting": link if len(link) <= 36 else link[:35] + "\u2026",
-                  "Bot": clean_name(self.name.get()) or DEFAULT_NAME,
+                  "Bot": self.bot_name(),
                   "Knowledge": os.path.basename(os.path.normpath(self.kb.get().strip())) or "(none)",
-                  "Voice": voice}
+                  "Voice": VOICE_LABELS[self.voice_mode()]}
         for key, label in self.summary_values.items():
             label.configure(text=values[key])
 
@@ -914,12 +913,100 @@ class App:
             w.configure(state="disabled" if running else "normal")
         self.join_btn.configure(state="disabled" if running else "normal")
         self.check_btn.configure(state="disabled" if running else "normal")
+        self.gear.configure(state="disabled" if running else "normal")
         self.leave_btn.configure(state="normal" if meeting else "disabled")
-        for w in (self.ask_entry, self.ask_btn, self.say_btn, self.view_entry, *self.view_buttons):
+        for w in (self.view_entry, *self.view_buttons):
             w.configure(state="normal" if meeting else "disabled")
-        self.ask_help.configure(text=ASK_HELP_LIVE if meeting else ASK_HELP_IDLE)
         if running:
             self.set_status("Checking setup…" if mode == "check" else "Starting…", "busy")
+
+
+class SettingsDialog:
+    """Advanced settings (the header's gear): the bot's name and speech. Nothing changes until
+    Save. Speech stays greyed out until Azure Speech is set up on this PC (speech_ready)."""
+
+    def __init__(self, app):
+        self.app, px = app, app.px
+        self.ready = app.speech_available()
+        self.name = tk.StringVar(value=app.name.get())
+        self.speech = tk.BooleanVar(value=app.speech.get() and self.ready)
+        self.mode = tk.StringVar(value=app.speech_mode.get())
+        self.win = w = tk.Toplevel(app.root, bg=SURFACE)
+        w.title("Advanced settings")
+        w.transient(app.root)
+        w.resizable(False, False)
+        try:
+            w.iconbitmap(os.path.join(HERE, "claude_teams_bot.ico"))
+        except Exception:
+            pass
+        body = ttk.Frame(w, style="Card.TFrame", padding=(px(24), px(20)))
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, minsize=px(120))
+
+        def help_text(row, text=""):
+            lbl = ttk.Label(body, text=text, style="Help.Card.TLabel", wraplength=px(400))
+            lbl.grid(row=row, column=1, sticky="w", pady=(px(4), px(16)))
+            return lbl
+
+        ttk.Label(body, text="Bot name", style="Field.Card.TLabel").grid(row=0, column=0, sticky="w")
+        self.name_entry = ttk.Entry(body, textvariable=self.name, width=44)
+        self.name_entry.grid(row=0, column=1, sticky="ew")
+        help_text(1, NAME_HELP)
+
+        ttk.Label(body, text="Speech", style="Field.Card.TLabel").grid(row=2, column=0, sticky="w")
+        self.speech_check = ttk.Checkbutton(body, text="Speak answers in the meeting", variable=self.speech,
+                                            style="Card.TCheckbutton", command=self.sync)
+        self.speech_check.grid(row=2, column=1, sticky="w")
+        seg = tk.Frame(body, bg=BORDER_STRONG)       # shows through 1px gaps: outline + dividers
+        seg.grid(row=3, column=1, sticky="w", pady=(px(10), 0))
+        self.mode_buttons = []
+        for i, (text, value) in enumerate(SPEECH_MODES):
+            b = ttk.Radiobutton(seg, text=text, value=value, variable=self.mode,
+                                style="Segment.TRadiobutton", command=self.sync)
+            b.grid(row=0, column=i, padx=(1, 1 if i == len(SPEECH_MODES) - 1 else 0), pady=1)
+            self.mode_buttons.append(b)
+        self.speech_help = help_text(4)
+
+        buttons = ttk.Frame(body, style="Card.TFrame")
+        buttons.grid(row=5, column=0, columnspan=2, sticky="e", pady=(px(4), 0))
+        ttk.Button(buttons, text="Cancel", command=self.cancel).grid(row=0, column=0)
+        ttk.Button(buttons, text="Save", style="Accent.TButton", command=self.save).grid(
+            row=0, column=1, padx=(px(8), 0))
+        self.sync()
+
+        w.bind("<Return>", lambda e: self.save())
+        w.bind("<Escape>", lambda e: self.cancel())
+        w.protocol("WM_DELETE_WINDOW", self.cancel)
+        w.update_idletasks()
+        root = app.root
+        x = root.winfo_rootx() + (root.winfo_width() - w.winfo_reqwidth()) // 2
+        w.geometry(f"+{max(0, x)}+{max(0, root.winfo_rooty() + px(80))}")
+        if root.winfo_viewable():                    # modal (the tests' hidden window can't grab)
+            w.wait_visibility()
+            w.grab_set()
+        self.name_entry.focus_set()
+
+    def sync(self):
+        """Grey out what can't apply: all of speech without Azure Speech, the mode while it's off."""
+        on = self.ready and self.speech.get()
+        self.speech_check.state(["!disabled"] if self.ready else ["disabled"])
+        for b in self.mode_buttons:
+            b.state(["!disabled"] if on else ["disabled"])
+        self.speech_help.configure(text=VOICE_HELP[self.mode.get()] if on
+                                   else VOICE_HELP["off"] if self.ready else SPEECH_MISSING)
+
+    def save(self):
+        a = self.app
+        values = {"name": a.set_bot_name(self.name.get())}
+        if self.ready:                               # without Speech, the saved choice waits for it
+            a.speech.set(self.speech.get())
+            a.speech_mode.set(self.mode.get())
+            values.update(speech=self.speech.get(), speech_mode=self.mode.get())
+        a.remember(**values)
+        self.win.destroy()
+
+    def cancel(self):
+        self.win.destroy()
 
 
 def main():

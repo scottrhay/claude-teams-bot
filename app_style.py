@@ -71,6 +71,7 @@ class Fonts:
         semi = _first(fams, "Segoe UI Variable Text Semibold", "Segoe UI Semibold")
         title = _first(fams, "Segoe UI Variable Display Semib", "Segoe UI Semibold") or semi
         mono = _first(fams, "Cascadia Mono", "Consolas") or "Courier"
+        icons = _first(fams, "Segoe Fluent Icons", "Segoe MDL2 Assets")     # Windows 11, Windows 10
 
         def font(size, family=ui, strong=False):
             if strong:                               # semibold face, else bold weight
@@ -88,6 +89,9 @@ class Fonts:
                       else tkfont.Font(root, family=ui, size=13, weight="bold"))
         self.mono = font(9, family=mono)
         self.tiny = font(2)
+        # The settings gear: Windows' icon font, or the Unicode gear where it is missing.
+        self.icon = font(12, family=icons) if icons else font(12)
+        self.gear = "\ue713" if icons else "\u2699"
 
 
 class Theme:
@@ -148,6 +152,10 @@ class Theme:
         button("Danger.TButton", SURFACE, DANGER, "#e7b9b4", DANGER_SOFT, "#f9d7d2",
                BG, DISABLED, BORDER, padding=(px(20), px(6)), font=f.strong, focuscolor=DANGER)
         st.configure("Key.TButton", padding=(px(12), px(6)), width=-5)   # clam's default is -11
+        button("Icon.TButton", SURFACE, MUTED, SURFACE, "#f2f4f7", "#e6e9ee",     # header gear
+               SURFACE, DISABLED, SURFACE, padding=(px(8), px(6)), font=f.icon, width=0,
+               focuscolor=ACCENT)
+        st.map("Icon.TButton", foreground=[("disabled", DISABLED), ("active", TEXT)])
 
         st.configure("TEntry", fieldbackground=SURFACE, foreground=TEXT, bordercolor=BORDER_STRONG,
                      lightcolor=SURFACE, darkcolor=SURFACE, padding=(px(8), px(6)))
@@ -180,8 +188,8 @@ class Theme:
             except tk.TclError:                      # element already exists in this interpreter
                 pass
 
-        # Segmented control (voice mode): borderless radio buttons on a strip whose colour
-        # shows through 1px gaps as the outline and dividers (see App._build_setup).
+        # Segmented control (speech mode): borderless radio buttons on a strip whose colour
+        # shows through 1px gaps as the outline and dividers (see app.SettingsDialog).
         st.layout("Segment.TRadiobutton", [("Button.border", {"sticky": "nswe", "children": [
             ("Radiobutton.focus", {"sticky": "nswe", "children": [
                 ("Radiobutton.padding", {"sticky": "nswe", "children": [

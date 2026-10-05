@@ -35,12 +35,19 @@ Open **Claude-Teams-Bot** from the Desktop or the Start menu. The **Control** ta
 | Field | What to enter |
 |---|---|
 | **Meeting link** | The Teams join link (starts with `https://teams.microsoft.com/`). A link that isn't a Teams link is flagged under the field. |
-| **Bot name** | How the bot appears when it joins as a guest. Pre-filled "Claude Meeting Assistant"; leave it empty to go back to that. Teams accepts letters, numbers, spaces and `- ' . _ @`. When the bot is signed in as its own account, Teams shows that account's name instead. |
 | **Knowledge folder** | The meeting's folder (**Browse…**). If you leave the default (`agent\project`), Claude answers from the fictional sample files. |
-| **Speak answers** | **When asked**: speaks only when a question says "out loud". **Always**: speaks every answer. **Off**: chat only. |
 
 Click **Join meeting**. The setup form folds into a **This meeting** summary while the bot runs. The
-app remembers the last link, name, folder, voice choice and technical-details setting.
+app remembers the last link, folder and technical-details setting.
+
+**Advanced settings** (the gear at the top right; not available while the bot is in a meeting):
+
+| Setting | What it does |
+|---|---|
+| **Bot name** | How the bot appears when it joins as a guest. Pre-filled "Claude Meeting Assistant"; leave it empty to go back to that. Teams accepts letters, numbers, spaces and `- ' . _ @`. When the bot is signed in as its own account, Teams shows that account's name instead. The header shows this name. |
+| **Speak answers in the meeting** | Tick it, then choose **When asked** (speaks only when a question says "out loud") or **Always** (speaks every answer). Greyed out until your admin sets up Azure Speech on this PC ([Admin Guide](ADMIN_GUIDE.md#voice-azure-ai-speech)); until then answers go to the chat only. |
+
+Click **Save** to keep the changes, or **Cancel**.
 
 The status pill at the top right shows what the bot is doing:
 
@@ -60,6 +67,8 @@ When the bot is ready, it posts this notice in the meeting chat:
 
 > Claude meeting assistant has joined and is reading Teams live captions to keep a transcript. Ask a
 > question by saying "Hey Claude, ..." - answers post here. Add "out loud" to hear the answer spoken.
+
+When speech is off, the last sentence is left out.
 
 ## During the meeting
 
@@ -82,7 +91,7 @@ When the bot is ready, it posts this notice in the meeting chat:
   in the chat ("Sorry, … I couldn't get an answer just now").
 - **Hear it.** Add "out loud", "aloud" or "tell us" to the question, for example "Hey Claude, tell us
   out loud who owns the network refresh". The bot speaks the first one or two sentences. The full
-  answer still goes to the chat.
+  answer still goes to the chat. This works only when the operator has speech on.
 - **Forgot to say "out loud"?** Say "Hey Claude, say that out loud" (or "read that", "repeat that"). The
   bot reads its last answer straight away.
 - **Know what Claude can answer from.** Claude knows what was said so far (from the captions), the
@@ -93,11 +102,6 @@ When the bot is ready, it posts this notice in the meeting chat:
 
 - **Activity** shows each caption, each question and each of Claude's answers as they happen. Tick
   **Show technical details** to add the bot's step-by-step log.
-- **Ask Claude** (available once the bot is in the meeting):
-  - **Ask privately**: type a question that only you see. The answer appears in Activity. Private
-    questions and answers never reach the meeting chat, the summary or the wrap-up. They are saved to
-    `operator_private_*.md`. Your later private questions can see the earlier private ones.
-  - **Say out loud**: Claude says your text, word for word, in the meeting.
 - **Meeting view** tab: a live picture of the bot's browser, updated about once a second. Click in the
   picture to click in the meeting. Use the box underneath to type, with buttons for Enter, Esc, Tab and
   Backspace.
@@ -171,7 +175,7 @@ Ctrl+C also writes the transcript and summary, but posts no wrap-up.
 | "Got it", but no answer | The model is slow or unreachable. A "Sorry … couldn't get an answer" note means every model path failed. Run **Check setup** after the meeting. |
 | The answer ignores the meeting's files | Make sure the Knowledge folder points at the meeting's folder, not the default sample folder. When the bot starts, Activity shows "Preparing the knowledge folder…" and then "Knowledge folder ready". |
 | A file is never cited | Scanned PDFs (pages that are only pictures) can't be searched, and password-protected files can't be read. Activity names such files when the bot first sees them. Use a text-based copy. |
-| No voice | Check that Speak answers is not **Off** and that the question said "out loud". Run **Check setup**: the Azure AI Speech line must pass. The bot waits until nobody has spoken for 1.5 seconds before it speaks. |
+| No voice | Open **Advanced settings** (the gear). If speech is greyed out, Azure Speech isn't set up on this PC: ask your admin. Otherwise check that **Speak answers in the meeting** is ticked and that the question said "out loud". Run **Check setup**: the Azure AI Speech line must pass. The bot waits until nobody has spoken for 1.5 seconds before it speaks. |
 | The room hears an echo | The bot never plays the meeting's audio on its PC. Make sure nobody started it with `--hear-meeting`. |
 | The bot joins as a guest instead of as its account, or stops at a Microsoft sign-in page | The saved sign-in is missing (**Check setup** shows "Saved sign-in … absent") or has expired. Run `.\run.ps1 -Login` to sign the bot account in again. |
 | **Check setup** shows FAIL lines | Fix each FAIL line. Its text says what is missing: the API key, the Foundry settings, the Speech resource, or the Chromium install or agent engine (for those two, run `setup.ps1` again). |

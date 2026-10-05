@@ -170,12 +170,18 @@ error reports. It ignores user and machine-wide Claude Code settings.
 | `SPEECH_KEY` | Speech key |
 | `SPEECH_ENDPOINT` | Optional: a full text-to-speech URL, which overrides the resource |
 
-If these are unset, Speech uses the Foundry resource name and key. **Check setup** makes one short
-text-to-speech call to confirm that it works.
+**Speech is off in the desktop app until you set `SPEECH_RESOURCE` (or `SPEECH_ENDPOINT`).** Until
+then the app starts the bot with `--voice off`, greys out the speech settings, leaves "out loud" out of
+the join notice, and **Check setup** skips the speech test. `SPEECH_KEY` defaults to the Foundry key, so
+to use speech on the Foundry resource itself, set only `SPEECH_RESOURCE` to the Foundry resource name.
+With speech set up, **Check setup** makes one short text-to-speech call to confirm that it works.
+
+Run from `run.ps1`, the bot defaults to `--voice asked` and, if `SPEECH_RESOURCE` is unset, falls back
+to the Foundry resource name and key.
 
 | Setting | Default | Notes |
 |---|---|---|
-| `--voice` (app: Speak answers) | `asked` | `asked` speaks when a question says "out loud", "aloud", "tell us" and similar. `always` speaks every answer. `off` never speaks. |
+| `--voice` (app: Advanced settings > Speak answers) | `asked` (app: `off` until speech is set up) | `asked` speaks when a question says "out loud", "aloud", "tell us" and similar. `always` speaks every answer. `off` never speaks. |
 | `--voice-name` | `en-US-AndrewNeural` | Any Azure neural voice name |
 
 The bot speaks only after the captions have been quiet for 1.5 seconds. It unmutes only while speaking

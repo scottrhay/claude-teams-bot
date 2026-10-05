@@ -21,15 +21,15 @@ summary when the meeting ends.
   something said in the meeting conflicts with a document.
 - **Speaks when asked.** Add "out loud" to a question and Azure AI Speech reads a short version of the
   answer into the meeting. "Hey Claude, say that out loud" repeats the last answer without another model
-  call.
-- **Takes private questions.** The operator can ask Claude something only they see. Private questions
-  never reach the chat, the summary or the wrap-up.
+  call. Speech is optional: the desktop app offers it once an admin sets up Azure Speech.
+- **Takes private questions.** At the bot's console (`run.ps1`), the operator can ask Claude something
+  only they see. Private questions never reach the chat, the summary or the wrap-up.
 - **Writes the meeting record.** It saves a speaker-labelled transcript and an executive summary
   (decisions, action items with named owners, open questions, risks), and posts a short wrap-up in the
   chat.
 - **Has a desktop app.** You paste the join link and click **Join meeting**. The app shows what the bot
   hears and answers, and includes a live **Meeting view** of the bot's browser for the occasional step
-  that needs a person.
+  that needs a person. The bot's name and speech are under **Advanced settings** (the gear).
 
 ## How it works
 

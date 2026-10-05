@@ -51,6 +51,7 @@ There is no build step, linter or formatter.
 - **app → bot:** stdin lines, the same commands an operator types at the bot's console (`/leave`, `/chat`,
   `/say`, `/speak`, `/voice`, `/summary`, `/post-summary`, plain text = private question), plus
   Meeting-view input (`/click x y`, `/type`, `/key`, `/scroll x y dy`, in browser-viewport pixels).
+  The app itself sends only `/leave` and Meeting-view input; the rest are console-only.
   A new app feature means a new branch in `MeetingBot.handle_command`.
 - **bot → app:** stdout log lines. `classify_line` sorts each one for the Activity feed: caption
   (`[ts] Name: text`), question (`Q (...)`), Claude's answer (`CLAUDE:` between `====` fences), technical
@@ -66,8 +67,15 @@ There is no build step, linter or formatter.
   printed. Restyle with tags, never by rewriting the text.
 - **Meeting view:** the bot writes `<outdir>/live_view.jpg` (atomic replace, every `--frame-interval` s);
   the app polls its mtime and maps canvas clicks back to the 1366x860 viewport (`fit_layout`, `canvas_to_page`).
-- The app parses `foundry.env.ps1` with a regex (`load_env_file`: quoted `$env:NAME = "value"` lines only)
-  instead of running PowerShell, while `run.ps1` dot-sources it. Keep that file to plain assignments.
+- The app parses `foundry.env.ps1` (`ENV_FILE`) with a regex (`load_env_file`: quoted `$env:NAME = "value"`
+  lines only) instead of running PowerShell, while `run.ps1` dot-sources it. Keep that file to plain
+  assignments.
+- **Speech is opt-in per PC.** `voice_mode()` gives the bot `--voice off` unless `speech_ready()` (an explicit
+  `SPEECH_RESOURCE` or `SPEECH_ENDPOINT`; the bot's own fallback to the Foundry resource doesn't count) and
+  the operator's choice in `SettingsDialog` (the header's gear: Bot name and speech, applied on Save). The
+  choice is saved as `speech` / `speech_mode`; `speech_settings()` reads the older single `voice` label.
+  While speech is unavailable, Save keeps the saved choice for when it is set up. The bot's `join_notice`
+  drops "out loud" when the voice is off, and `--check` skips the speech test.
 - `clean_name` / `NAME_BAD_CHARS` (Teams display-name rules) are duplicated in both files.
 
 ### Desktop app look (`app_style.py`)
@@ -77,7 +85,10 @@ defines no colours or fonts of its own. `main()` calls `enable_dpi_awareness()` 
 Windows bitmap-stretches the window at 125%+ and text blurs), and sizes go through `Theme.px()` (design pixels
 at 96 DPI). Default fonts are set on the `TkDefaultFont` / `TkTextFont` named fonts: `option_add("*Font")`
 would override every ttk label style's font. The header tabs are radio buttons driving a tabless
-`ttk.Notebook`.
+`ttk.Notebook`. The header shows the bot's name (`bot_name()`, updated as the Bot name changes); the app
+name is only in the window title. The gear is `Icon.TButton` with Windows' icon font (Segoe Fluent Icons,
+or Segoe MDL2 Assets on Windows 10). At 125% scaling the header needs about 1058 of the 1075 px minimum
+width with today's longest status text, so a longer pill text needs checking at the minimum width.
 
 ### Bot pipeline (`teams_meeting_bot.py`)
 
@@ -108,8 +119,8 @@ One file, top-down: selectors, injected JS, prompts, helpers, `MeetingAgent`, `M
    the model call; the reply awaits it, so it always posts first, and if every model path fails the asker
    gets a "Sorry" note instead of silence. Every answer is appended to `self.transcript` as a `Claude:` line;
    that list is the bot's only memory, re-sent with each question and the input to the summary.
-   `memory(private)` builds what the model sees: private Q&A (`to_chat=False`: plain console text, the
-   app's "Ask privately") goes to `operator_private_*.md` instead of the transcript file and reaches only
+   `memory(private)` builds what the model sees: private Q&A (`to_chat=False`: plain console text) goes
+   to `operator_private_*.md` instead of the transcript file and reaches only
    later private answers, never a public answer, the summary or the wrap-up. `private` is decided before
    `--console-only` masks `to_chat`, so console-only answers stay public. A new model call uses `memory()`
    unless it answers the operator privately; the `test_private_*` tests cover both model paths.
@@ -167,7 +178,8 @@ when `CLAUDE_CODE_USE_FOUNDRY=1` with `ANTHROPIC_FOUNDRY_RESOURCE` (or `_BASE_UR
 `app.py` take from `CLAUDE_FOUNDRY_DEPLOYMENT`. Keyless Entra ID is not supported: without the key
 `make_client()` raises "Missing credentials" when `MeetingBot` starts, and preflight and `azure_tts` need it
 too (only the agent subprocess would fall back to `az login`). Speech uses `SPEECH_RESOURCE` / `SPEECH_KEY` /
-`SPEECH_ENDPOINT`, falling back to the Foundry resource and key. `foundry.env.ps1` holds a live key in
+`SPEECH_ENDPOINT`, falling back to the Foundry resource and key (the desktop app turns speech on only with
+an explicit `SPEECH_RESOURCE` or `SPEECH_ENDPOINT`; see `speech_ready()`). `foundry.env.ps1` holds a live key in
 plaintext (gitignored): never print its values. `foundry.env.ps1.template`
 is published, so it holds placeholders only.
 
@@ -189,7 +201,9 @@ clicks, a JS confirm dialog, captions that grow word by word); update it with an
   time (launcher, lobby, captions, end), so each test takes about a minute. Claude is faked by replacing `anthropic.AsyncAnthropic`,
   `bot.agent.ask` / `complete`, and `tts`.
 - `test_app.py`: app helpers and the Activity feed (`classify_line`, `feed_segments`). Tests taking the `gui`
-  fixture drive a real, hidden `App` with no bot by calling `show_line()` with bot lines. Create test windows
+  fixture drive a real, hidden `App` with no bot by calling `show_line()` with bot lines. `hermetic()` points
+  `SETTINGS` and `ENV_FILE` at a temp folder and clears the Speech variables, so no test reads the real
+  `foundry.env.ps1`; `speech_set_up()` writes one with a Speech resource. Create test windows
   with `new_root()`, never bare `tk.Tk()`: it starts Tk without std handles, as `pythonw` does. Otherwise Tcl
   keeps stdout/stderr channels on pytest's per-test capture files, and once Windows reuses those closed
   handles, later Tk startups fail at random ("Can't find a usable tk.tcl", "couldn't read file ... init.tcl:
