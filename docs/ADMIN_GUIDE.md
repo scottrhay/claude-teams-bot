@@ -55,9 +55,11 @@ The meeting PC needs outbound HTTPS to these hosts:
   - Anthropic API: `api.anthropic.com`.
   - Microsoft Foundry: `https://<resource>.services.ai.azure.com/anthropic/`.
 - Speech: `https://<resource>.cognitiveservices.azure.com`, unless you set `SPEECH_ENDPOINT`.
-- The URL of each MCP server in `agent/mcp.json`. The default is `learn.microsoft.com`.
+- The URL of each MCP server you add to `agent/mcp.json`. None is enabled by default.
 
-Setup also downloads Python packages from PyPI and a Chromium build through Playwright.
+Setup also downloads Python packages from PyPI and a Chromium build through Playwright. The Claude
+Agent SDK package (about 100 MB) carries the agent engine, pinned to the version the tests ran; it
+needs 64-bit Windows.
 
 ## Microsoft Teams prerequisites
 
@@ -209,8 +211,10 @@ tools.
 
 ## MCP servers
 
-`agent/mcp.json` lists the MCP servers the agent may call. It uses the Claude Code format and ships
-with Microsoft Learn's public documentation server:
+`agent/mcp.json` lists the MCP servers the agent may call, in the Claude Code format. It ships empty:
+by default the agent answers from the meeting and the knowledge folder only, and no query leaves the PC
+except the model call. `agent/mcp.example.json` holds a sample entry for Microsoft Learn's public
+documentation server. The three kinds of entry look like this:
 
 ```json
 {
@@ -225,13 +229,14 @@ with Microsoft Learn's public documentation server:
 
 - **Every tool on a listed server is callable** by the agent. Only the servers in this file are loaded
   (strict MCP config). List only servers you trust with meeting content: the agent's queries to them
-  are built from what was said in the meeting.
+  are built from what was said in the meeting, so even a public documentation server sees fragments of
+  the conversation.
 - **Keep tokens out of git.** `agent/mcp.json` is tracked by git. If a server needs a token, choose one
   of these:
   - Keep the edit local with `git update-index --skip-worktree agent/mcp.json`.
   - Copy the `agent` folder somewhere outside the repo and run the bot with `--agent-dir <folder>`.
 - **After adding a server:**
-  1. Update the allow-list assertion in `tests/test_unit.py::test_agent_options_are_locked_down`.
+  1. Update the `ag.servers == []` assertion in `tests/test_unit.py::test_agent_options_are_locked_down`.
   2. Run the tests.
   3. Run **Check setup**. Its agent line lists the MCP tools it can use.
 
@@ -255,23 +260,31 @@ Each question runs one fresh agent session, locked down as follows:
 | Control | Setting |
 |---|---|
 | Built-in tools | `Read`, `Grep`, `Glob` only: no shell, file writes, web fetch or browser |
-| Permissions | `dontAsk`: anything not on the allow-list is refused, and nobody is prompted |
+| Permissions | `dontAsk`: the built-in tools work only inside the knowledge folder. Anything else, including a read elsewhere on the PC, is refused, and nobody is prompted. The only allow rules are the MCP servers in `agent/mcp.json`. |
 | Working folder | The knowledge folder |
-| MCP | Only `agent/mcp.json` (strict) |
+| MCP | Only `agent/mcp.json` (strict); none by default |
 | Settings | No user or machine-wide Claude Code settings are loaded |
-| Caps | Budget, turns and time per question (below) |
+| Prompts | Sent verbatim: an `@file` mention in the captions is not expanded into that file's contents |
+| Session copies | None: the engine keeps no copy of the conversation on disk |
+| Engine | The `claude.exe` inside the pinned Agent SDK package, never whatever is on the PATH |
+| Limits | Spend, turns and time per question (below) |
 
-If the agent fails (timeout, budget, MCP error), the bot answers again without tools, and then with a
-direct API call. The meeting always gets an answer.
+`tests/test_engine.py` checks these against the real engine, offline. Check setup shows **Agent engine
+pinned**; if it fails, run `setup.ps1` again.
+
+If the agent fails or hits a limit (timeout, spend, turns, MCP error), the bot answers again without
+tools, and then with a direct API call. A limit never stops the bot for the rest of the meeting. If
+every route fails, the asker gets a "Sorry, … I couldn't get an answer just now" note (unless `--no-ack`
+is set) and the bot keeps listening.
 
 ## Cost and latency controls
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--agent-budget` | `0.75` | Maximum USD per question for the agent |
-| `--agent-max-turns` | `12` | Maximum agent turns per question |
+| `--agent-budget` | `2.0` | USD backstop per question. A typical answer costs $0.01 to $0.06, so this only catches a runaway. When it trips, the bot answers without tools. |
+| `--agent-max-turns` | `12` | Maximum agent turns per question. When it's reached, the bot answers without tools. |
 | `--agent-timeout` | `120` | Seconds per question before the bot falls back to answering without tools |
-| `--ack-after` | `8` | Seconds before a "working on it" note is posted (`0` turns it off) |
+| `--no-ack` | off | Don't post the "Got it" note. By default the note goes in the chat as soon as a question is taken, quoting it as the captions heard it. |
 
 What makes billed calls:
 - **Each question:** an agent run, plus any fallback call.
@@ -282,11 +295,30 @@ What makes billed calls:
 The offline test suite makes no model calls. In testing, a typical question took 4 to 8 seconds and cost
 $0.01 to $0.05.
 
-The budget cap uses the agent engine's own cost estimate, so treat it as a guard rail, not a bill. Set
-hard limits with the provider:
-- **Azure:** a budget alert on the subscription or resource group, and a tokens-per-minute limit on the
-  deployment.
-- **Anthropic:** a spend limit on the API workspace.
+The summary and the chat wrap-up each get their own $5.00 limit (`SUMMARY_BUDGET_USD`), since they
+read the whole transcript.
+
+**There is no meeting or monthly limit, by design.** A limit that tripped mid-meeting would silence the
+bot when it matters most. The log shows the running spend instead, after each answer
+(`agent done: … cost=$0.023 (meeting so far: $0.41)`) and in total when the meeting ends
+(`model spend this meeting: about $…`). These figures are the agent engine's own estimates, so treat
+them as a guide, not a bill. When the engine doesn't recognize the model name (a model newer than the
+engine, or a Foundry deployment with its own name), it uses a default rate, twice its Sonnet 5 rate,
+so the figures run high, not low.
+
+Watch real spend at the provider with alerts, not hard stops, so nothing cuts the bot off mid-meeting:
+- **Azure:**
+  - Put a cost budget on the resource group, with alert thresholds (for example 50%, 80% and 100%)
+    sent to the owner. Azure budgets only send alerts; they never stop a resource.
+  - Check that the subscription has no spending limit. Credit-based subscriptions (Visual Studio,
+    free trial, sponsorship) have one on by default, and Azure disables the subscription's resources
+    when the credit runs out.
+  - Give the deployment a tokens-per-minute quota well above a meeting's peak. Each question sends the
+    transcript so far (roughly 12,000 tokens per hour of meeting) plus the files the agent reads, and an
+    agent run makes several calls. Calls over the quota fail; the bot falls back, but answers get
+    worse.
+- **Anthropic:** a workspace spend limit stops all calls once it's reached. Set it well above a month's
+  expected use and check usage in the Console.
 
 ## Security and data handling
 
@@ -337,7 +369,7 @@ passes `CLAUDE_FOUNDRY_DEPLOYMENT` as the model unless you set `-Model`.
 | `-Context "<file>"` | Background file for the fallback path |
 | `-Model "<name>"` | Model, or Foundry deployment name |
 | `-Login` | Sign the bot account in and save `teams_auth.json` |
-| `-Check` | Preflight: Python, Chromium, provider settings, a model call, an agent run (files and MCP), Speech, saved sign-in |
+| `-Check` | Preflight: Python, Chromium, provider settings, a model call, the pinned agent engine, an agent run (files and MCP), Speech, saved sign-in |
 
 ### `teams_meeting_bot.py`
 
@@ -371,8 +403,8 @@ Run it with `.\.venv\Scripts\python.exe teams_meeting_bot.py`. It does not load 
 | `--agent-dir` | `agent` | Folder with `instructions.md`, `project/` and `mcp.json` |
 | `--project` | `<agent-dir>/project` | Knowledge folder |
 | `--no-agent` | off | Transcript-only answers (no tools) |
-| `--agent-max-turns` / `--agent-budget` / `--agent-timeout` | `12` / `0.75` / `120` | Per-question caps |
-| `--ack-after` | `8` | "Working on it" delay in seconds (`0` = off) |
+| `--agent-max-turns` / `--agent-budget` / `--agent-timeout` | `12` / `2.0` / `120` | Per-question limits; tripping one falls back to an answer without tools |
+| `--no-ack` | off | Don't post "Got it" in the chat when a question is heard |
 | `--outdir` | `.` | Where the transcript, summary and log are written |
 
 ## When Teams changes its UI

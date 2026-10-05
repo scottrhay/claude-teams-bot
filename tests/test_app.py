@@ -131,7 +131,6 @@ def test_view_geometry_maps_clicks_to_page():
     assert app.canvas_to_page(10, 10, None) is None
     cmd = app.build_command("u", "b", "", "off", "o", python="py")
     assert cmd[cmd.index("--browser") + 1] == "embedded"
-    assert app.build_command("u", "b", "", "off", "o", python="py", browser="window")[-1] == "window"
 
 
 # ---------------------------------------------------------------- activity feed
@@ -281,3 +280,46 @@ def test_setup_form_validates_inline_and_collapses_while_running(gui, tmp_path):
     a.show_line("NOT READY - fix the FAIL lines above")
     a.process_ended()
     assert a.status.get() == "Setup needs attention – see Activity" and a.mode is None
+
+
+def widget_texts(w):
+    for child in w.winfo_children():
+        try:
+            yield str(child.cget("text"))
+        except tk.TclError:                            # widgets without a text option
+            pass
+        yield from widget_texts(child)
+
+
+def test_bot_name_has_no_reset_button(gui, tmp_path):
+    """An empty Bot name joins as the default, so the form needs no Reset button."""
+    assert "Reset" not in set(widget_texts(gui.root))
+    gui.link.set("https://teams.microsoft.com/meet/2401987654321?p=abc")
+    gui.kb.set(str(tmp_path))
+    gui.name.set("   ")
+    assert gui.validate()[1] == app.DEFAULT_NAME
+
+
+def test_meeting_always_runs_in_the_meeting_view(tmp_path, monkeypatch):
+    """The bot's browser runs off-screen and shows in the Meeting view; run.ps1 is the
+    real-window path. A show_window setting saved by an older version is ignored."""
+    monkeypatch.setattr(app, "SETTINGS", str(tmp_path / "settings.json"))
+    app.save_settings({"show_window": True})
+    try:
+        root = new_root()
+    except tk.TclError as e:                          # e.g. Linux CI without $DISPLAY
+        if sys.platform == "win32":
+            raise
+        pytest.skip(f"no display: {e}")
+    root.withdraw()
+    try:
+        a = app.App(root, python="python")
+        assert not any("own window" in t for t in widget_texts(root))
+        launched = []
+        monkeypatch.setattr(a, "launch", lambda cmd, mode="meeting": launched.append(cmd))
+        a.link.set("https://teams.microsoft.com/meet/2401987654321?p=abc")
+        a.kb.set(str(tmp_path))
+        a.start()
+        assert launched[0][launched[0].index("--browser") + 1] == "embedded"
+    finally:
+        root.destroy()

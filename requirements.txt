@@ -1,6 +1,10 @@
 playwright>=1.45
 anthropic>=0.76
-claude-agent-sdk>=0.2.150
+# Pinned: the agent engine (Claude Code's claude.exe, 2.1.281) ships inside this SDK's Windows
+# wheel, so every PC runs the engine the tests ran. 0.2.159 is the newest release with a Windows
+# wheel; --only-binary stops pip from building an engine-less copy from source instead.
+--only-binary=claude-agent-sdk
+claude-agent-sdk==0.2.159
 python-docx>=1.1
 python-pptx>=1.0
 openpyxl>=3.1

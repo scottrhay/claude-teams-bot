@@ -204,6 +204,10 @@ CHAT_SUMMARY_PROMPT = """Write a short meeting wrap-up for the meeting chat: pla
 no markdown, under 120 words: key decisions, then action items as "Owner - action - due".
 Only what the transcript supports."""
 
+# The summary and wrap-up run once per meeting and must not fail, so their spend limit is a
+# backstop far above what even a long meeting's summary costs.
+SUMMARY_BUDGET_USD = 5.0
+
 
 LOG_FILE = None
 
@@ -364,6 +368,33 @@ def make_client():
 
 def foundry_enabled():
     return os.environ.get("CLAUDE_CODE_USE_FOUNDRY", "").lower() in ("1", "true")
+
+
+def bundled_engine():
+    """The agent engine (Claude Code's claude.exe) inside the pinned Agent SDK wheel, or None.
+    Without it the SDK runs whatever claude.exe is on PATH, at whatever version that is."""
+    try:
+        import claude_agent_sdk
+    except ImportError:
+        return None
+    exe = os.path.join(os.path.dirname(claude_agent_sdk.__file__), "_bundled",
+                       "claude.exe" if os.name == "nt" else "claude")
+    return exe if os.path.isfile(exe) else None
+
+
+def engine_version():
+    try:
+        from claude_agent_sdk._cli_version import __cli_version__
+        return __cli_version__
+    except ImportError:
+        return "unknown"
+
+
+def engine_note(line):
+    """The engine's stderr (e.g. "[claude-code:unrecognized_model] ..." for a Foundry deployment
+    name it has no price for) goes to the log as a technical detail, not to the app's feed."""
+    if line.strip():
+        log(f"  engine: {line.rstrip()}")
 
 
 def now_text():
@@ -532,12 +563,14 @@ class MeetingAgent:
       - instructions.md  -> system prompt
       - project/         -> working dir; read-only Read/Grep/Glob tools
       - mcp.json         -> MCP servers ({"mcpServers": {...}}, Claude Code format)
-    Permissions are dontAsk + an explicit allow-list: read-only file tools and the MCP
-    servers named in mcp.json. No shell, no writes, no web unless an MCP server adds it."""
+    Permissions are dontAsk: reads inside the working dir need no approval, the MCP servers
+    named in mcp.json are allowed, everything else is denied. No shell, no writes, no web
+    unless an MCP server adds it. tests/test_engine.py checks this in the real engine."""
 
     READ_TOOLS = ["Read", "Grep", "Glob"]
 
     def __init__(self, agent_dir, model, max_turns, budget, timeout_s, project_dir=None):
+        self.spent = 0.0               # engine's cost estimate for every run so far, in USD
         self.dir = os.path.abspath(agent_dir)
         self.project = os.path.abspath(project_dir) if project_dir else os.path.join(self.dir, "project")
         self.mcp_path = os.path.join(self.dir, "mcp.json")
@@ -554,11 +587,14 @@ class MeetingAgent:
 
     def describe(self):
         n = sum(len(fs) for r, _, fs in os.walk(self.project) if TEXT_DIR not in r)
+        engine = (f"Claude Code {engine_version()} (pinned)" if bundled_engine()
+                  else "claude.exe from PATH (not pinned - run setup.ps1)")
         return (f"instructions.md, {n} file(s) in {self.project}, "
                 f"MCP: {', '.join(self.servers) if self.servers else 'none'}, "
-                f"model: {self.model} via {'Microsoft Foundry' if foundry_enabled() else 'Anthropic API'}")
+                f"model: {self.model} via {'Microsoft Foundry' if foundry_enabled() else 'Anthropic API'}, "
+                f"engine: {engine}")
 
-    def options(self, use_tools=True, max_turns=None):
+    def options(self, use_tools=True, max_turns=None, budget=None):
         from claude_agent_sdk import ClaudeAgentOptions
         tools = self.READ_TOOLS if use_tools else []
         servers = self.servers if use_tools else []
@@ -566,15 +602,21 @@ class MeetingAgent:
             system_prompt=self.instructions,
             cwd=self.project,
             tools=tools,                                            # built-ins: read-only
-            allowed_tools=tools + [f"mcp__{n}" for n in servers],
+            # Only MCP servers need a rule: reads inside cwd run without one in dontAsk mode,
+            # and a bare "Read" rule would also allow every other file on the PC.
+            allowed_tools=[f"mcp__{n}" for n in servers],
             mcp_servers=self.mcp_path if servers else {},
             strict_mcp_config=True,                                 # ONLY mcp.json servers
             permission_mode="dontAsk",                              # anything else denied
             setting_sources=[],                                     # ignore user/global settings
+            verbatim_prompts=True,                  # an @path in captions stays text, not a file read
+            extra_args={"no-session-persistence": None},            # no transcript copies on disk
+            cli_path=bundled_engine(),                              # the pinned engine
+            stderr=engine_note,                                     # its notices: log details
             env=self._env(),
             model=self.model,
             max_turns=max_turns or self.max_turns,
-            max_budget_usd=self.budget)
+            max_budget_usd=budget or self.budget)
 
     def _env(self):
         env = {"CLAUDE_CODE_ENABLE_CFC": "0",                       # no built-in browser server
@@ -587,17 +629,21 @@ class MeetingAgent:
             env["ANTHROPIC_SMALL_FAST_MODEL"] = self.model
         return env
 
-    async def _run(self, prompt, use_tools=True, max_turns=None):
+    async def _run(self, prompt, use_tools=True, max_turns=None, budget=None):
         from claude_agent_sdk import query, AssistantMessage, ResultMessage, ToolUseBlock
         tools, result = [], None
-        async for m in query(prompt=prompt, options=self.options(use_tools, max_turns)):
-            if isinstance(m, AssistantMessage):
-                for b in m.content:
-                    if isinstance(b, ToolUseBlock):
-                        tools.append(b.name)
-                        log(f"  agent tool: {b.name} {json.dumps(b.input)[:120]}")
-            elif isinstance(m, ResultMessage):
-                result = m
+        try:
+            async for m in query(prompt=prompt, options=self.options(use_tools, max_turns, budget)):
+                if isinstance(m, AssistantMessage):
+                    for b in m.content:
+                        if isinstance(b, ToolUseBlock):
+                            tools.append(b.name)
+                            log(f"  agent tool: {b.name} {json.dumps(b.input)[:120]}")
+                elif isinstance(m, ResultMessage):
+                    result = m
+        finally:
+            # A run stopped by a limit raises after its result arrives; its cost still counts.
+            self.spent += (result.total_cost_usd or 0) if result else 0
         if result is None or result.is_error or not (result.result or "").strip():
             raise RuntimeError(f"agent error: {getattr(result, 'subtype', 'no result')} "
                                f"{getattr(result, 'errors', '')}")
@@ -608,11 +654,12 @@ class MeetingAgent:
                                      now=now_text())
         return await asyncio.wait_for(self._run(prompt), timeout=self.timeout)
 
-    async def complete(self, transcript, task, timeout=None):
+    async def complete(self, transcript, task, timeout=None, budget=None):
         """Single-shot, no tools: summaries and the fallback when tools/MCP fail."""
         prompt = f"<meeting_transcript>\n{transcript}\n</meeting_transcript>\n\n{task}"
         text, _, _ = await asyncio.wait_for(
-            self._run(prompt, use_tools=False, max_turns=2), timeout=timeout or self.timeout)
+            self._run(prompt, use_tools=False, max_turns=2, budget=budget),
+            timeout=timeout or self.timeout)
         return text
 
 
@@ -747,7 +794,7 @@ class MeetingBot:
                 log(f"  (duplicate of a question just asked - skipped: {q})")
                 return
         self.recent_q.append((p["speaker"], key, now))
-        self.spawn(self.answer(q, p["speaker"], to_chat=True))
+        self.spawn(self.answer(q, p["speaker"], to_chat=True, heard=True))
 
     def spawn(self, coro):
         asyncio.get_running_loop().create_task(coro)
@@ -763,11 +810,11 @@ class MeetingBot:
              "cache_control": {"type": "ephemeral"}},
             {"type": "text", "text": tail}]}]
 
-    async def claude(self, tail, max_tokens=600, private=False):
+    async def claude(self, tail, max_tokens=600, private=False, budget=None):
         if self.agent:
             try:
                 return await self.agent.complete(self.memory(private), tail,
-                                                 timeout=max(self.a.agent_timeout, 180))
+                                                 timeout=max(self.a.agent_timeout, 180), budget=budget)
             except Exception as e:
                 log(f"  agent completion failed ({str(e)[:120]}) - trying direct API")
         resp = await self.client.messages.create(
@@ -778,7 +825,8 @@ class MeetingBot:
     def is_repeat_request(self, question):
         return bool(self.last_answer) and bool(REPEAT_ASK.match(question or ""))
 
-    async def answer(self, question, asker, to_chat):
+    async def answer(self, question, asker, to_chat, heard=False):
+        """heard: asked aloud in the meeting, so the asker gets a "Got it" in the chat at once."""
         log(f"Q ({asker}): {question}")
         private = not to_chat          # asked privately; --console-only answers stay public
         to_chat = to_chat and not self.a.console_only
@@ -789,37 +837,45 @@ class MeetingBot:
                 log("  repeating the last answer out loud")
                 await self.speak(spoken_version(self.last_answer))
             return
+        # Posted while the model works; the reply waits for it, so "Got it" always comes first.
+        ack = asyncio.get_running_loop().create_task(self.acknowledge(asker, question)) \
+            if heard and to_chat and self.a.ack else None
         ans = None
         if self.agent:
-            ack = None
-            if to_chat and self.a.ack_after > 0:
-                async def acknowledge():
-                    await asyncio.sleep(self.a.ack_after)
-                    await self.post_chat(f"Claude: working on {asker}'s question...")
-                ack = asyncio.get_running_loop().create_task(acknowledge())
             try:
                 ans, tools, cost = await self.agent.ask(self.memory(private), asker, question)
-                log(f"  agent done: tools={tools or 'none'} cost=${cost or 0:.3f}")
+                log(f"  agent done: tools={tools or 'none'} cost=${cost or 0:.3f} "
+                    f"(meeting so far: ${self.agent.spent:.2f})")
             except Exception as e:
                 log(f"  agent failed ({type(e).__name__}: {str(e)[:160]}) - falling back "
                     f"to transcript-only answer")
-            finally:
-                if ack:
-                    ack.cancel()
         if ans is None:
             try:
                 ans = await self.claude(f"Current date and time: {now_text()}\n{asker} asks: {question}",
                                         private=private)
             except Exception as e:
                 log(f"Claude API error: {e}")
+                if ack:                    # the asker was told "Working on it"
+                    await ack
+                    await self.post_chat(f"Claude: Sorry, {asker} – I couldn't get an answer just now.")
                 return
         print(f"\n{'=' * 70}\nCLAUDE: {ans}\n{'=' * 70}\n", flush=True)
         self.add_line("Claude", f"(Q from {asker}: {question}) {ans}", private)
         if to_chat:
+            if ack:
+                await ack
             await self.post_chat(f"Claude: {ans}")
             self.last_answer = ans
         if to_chat and self.wants_voice(question):
             await self.speak(spoken_version(ans))
+
+    async def acknowledge(self, asker, question):
+        """Tell the asker straight away that Claude is on it, quoting what the captions heard."""
+        heard = question if len(question) <= 120 else question[:117].rstrip() + "..."
+        try:
+            await self.post_chat(f'Claude: Got it, {asker} – "{heard}" Working on it.')
+        except Exception as e:
+            log(f"  [acknowledgement not posted: {str(e)[:120]}]")
 
     # ------------------------------------------------------------------ voice
     def wants_voice(self, question):
@@ -942,7 +998,7 @@ class MeetingBot:
             log("No transcript yet.")
             return
         try:
-            text = await self.claude(SUMMARY_PROMPT, max_tokens=4000)
+            text = await self.claude(SUMMARY_PROMPT, max_tokens=8000, budget=SUMMARY_BUDGET_USD)
         except Exception as e:
             log(f"Claude API error: {e}")
             return
@@ -951,8 +1007,11 @@ class MeetingBot:
             f.write(text + "\n")
         log(f"Summary saved: {os.path.abspath(out)}")
         if to_chat:
-            wrap = await self.claude(CHAT_SUMMARY_PROMPT, max_tokens=500)
+            wrap = await self.claude(CHAT_SUMMARY_PROMPT, max_tokens=500, budget=SUMMARY_BUDGET_USD)
             await self.post_chat(f"Claude - meeting wrap-up:\n{wrap}")
+        if self.agent:
+            log(f"  model spend this meeting: about ${self.agent.spent:.2f} (engine estimate; "
+                f"no meeting limit)")
 
     # ------------------------------------------------------------------ Teams UI
     async def debug(self, step):
@@ -1542,6 +1601,10 @@ async def preflight(args):
         except Exception as e:
             res(f"Claude API + model {args.model}", False, str(e)[:200])
     if not args.no_agent:
+        res("Agent engine pinned", bool(bundled_engine()),
+            f"Claude Code {engine_version()} from the Agent SDK" if bundled_engine() else
+            "no claude.exe inside the Agent SDK, so the bot would run whatever claude.exe is on "
+            "PATH -> run setup.ps1")
         try:
             ag = MeetingAgent(args.agent_dir, args.model, args.agent_max_turns,
                               args.agent_budget, args.agent_timeout, args.project)
@@ -1615,11 +1678,14 @@ def parse_args(argv=None):
     p.add_argument("--project", default=None,
                    help="pre-meeting materials folder (default: <agent-dir>/project)")
     p.add_argument("--no-agent", action="store_true", help="transcript-only answers (no tools)")
+    # Per-question limits stop a runaway agent. Hitting one never silences the bot: the answer
+    # comes from the transcript instead. There is no per-meeting or monthly limit.
     p.add_argument("--agent-max-turns", type=int, default=12)
-    p.add_argument("--agent-budget", type=float, default=0.75, help="max USD per question")
+    p.add_argument("--agent-budget", type=float, default=2.0,
+                   help="USD backstop per question (typical answer: about $0.01-0.06)")
     p.add_argument("--agent-timeout", type=float, default=120, help="seconds per question")
-    p.add_argument("--ack-after", type=float, default=8,
-                   help="post 'working on it' in chat if the agent takes longer (0=off)")
+    p.add_argument("--no-ack", dest="ack", action="store_false",
+                   help="don't post 'Got it' in chat when a question is heard")
     p.add_argument("--outdir", default=".")
     return p.parse_args(argv)
 

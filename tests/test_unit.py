@@ -1,9 +1,13 @@
 """Unit tests: run with  python -m pytest -q"""
 import asyncio
+import json
 import os
+import re
 import sys
 import urllib.parse
 from types import SimpleNamespace
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("ANTHROPIC_API_KEY", "test")
@@ -64,16 +68,41 @@ def test_finalizer_emits_new_words_only(tmp_path):
 
 
 def test_agent_options_are_locked_down():
-    ag = tb.MeetingAgent(os.path.join(ROOT, "agent"), "claude-sonnet-5-5", 12, 0.75, 120)
+    ag = tb.MeetingAgent(os.path.join(ROOT, "agent"), "claude-sonnet-5-5", 12, 2.0, 120)
     o = ag.options()
     assert o.tools == ["Read", "Grep", "Glob"]                 # no Bash/Write/Edit/WebFetch
     assert o.permission_mode == "dontAsk"
-    assert "mcp__microsoft-learn" in o.allowed_tools
-    assert set(o.allowed_tools) == {"Read", "Grep", "Glob", "mcp__microsoft-learn"}
+    assert o.allowed_tools == []          # reads in cwd need no rule; a bare "Read" allows any file
+    assert ag.servers == [] and o.mcp_servers == {}            # no MCP server ships enabled
     assert o.cwd.endswith(os.path.join("agent", "project"))
-    assert str(o.mcp_servers).endswith("mcp.json")
-    assert o.setting_sources == [] and o.max_budget_usd == 0.75
+    assert o.setting_sources == [] and o.max_budget_usd == 2.0
+    assert o.verbatim_prompts                                  # no @file expansion in captions
+    assert o.extra_args == {"no-session-persistence": None}    # no transcript copies on disk
+    assert o.cli_path == tb.bundled_engine() and o.cli_path    # the pinned engine, not PATH's
+    assert o.stderr is tb.engine_note                          # engine notices: log details
     assert "AI meeting assistant for the leadership team" in o.system_prompt
+
+
+def test_engine_notes_are_technical_details(capsys):
+    tb.engine_note('[claude-code:unrecognized_model] {"model":"my-deployment"}\n')
+    tb.engine_note("   \n")
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 1 and re.match(
+        r'\[\d\d:\d\d:\d\d\]   engine: \[claude-code:unrecognized_model\] \{"model":"my-deployment"\}$', out[0])
+
+
+def test_mcp_servers_are_the_only_allow_rules(tmp_path):
+    (tmp_path / "project").mkdir()
+    (tmp_path / "instructions.md").write_text("x", encoding="utf-8")
+    (tmp_path / "mcp.json").write_text('{"mcpServers": {"docs": {"type": "http", "url": "https://x"}}}')
+    o = tb.MeetingAgent(str(tmp_path), "m", 12, 2.0, 120).options()
+    assert o.allowed_tools == ["mcp__docs"] and str(o.mcp_servers).endswith("mcp.json")
+    assert tb.MeetingAgent(str(tmp_path), "m", 12, 2.0, 120).options(use_tools=False).allowed_tools == []
+
+
+def test_example_mcp_config_is_valid_json():
+    with open(os.path.join(ROOT, "agent", "mcp.example.json"), encoding="utf-8") as f:
+        assert "microsoft-learn" in json.load(f)["mcpServers"]
 
 
 def test_agent_prompt_contains_transcript_and_question():
@@ -371,7 +400,7 @@ def test_private_question_never_reaches_the_meeting_through_the_agent(tmp_path):
         sent.append(f"{transcript}\n{asker} asks: {question}")
         return replies.pop(0), [], 0.0
 
-    async def complete(transcript, task, timeout=None):
+    async def complete(transcript, task, timeout=None, budget=None):
         sent.append(f"{transcript}\n{task}")
         return replies.pop(0)
     bot.agent.ask, bot.agent.complete = ask, complete
@@ -417,3 +446,134 @@ def test_private_questions_alone_get_no_summary_or_wrap_up(tmp_path):
     asyncio.run(bot.answer(PRIVATE_Q, "Operator", to_chat=False))
     asyncio.run(bot.summarize(to_chat=True))
     assert len(sent) == 1 and chat == []               # only the private answer used the model
+
+
+# A question heard in the meeting gets an immediate "Got it" that repeats it as heard: the asker
+# knows Claude is on it, and a caption mishear shows before the answer does.
+QUESTION, ANSWER = "what's the Q4 capex number?", "Q4 IT capex is $2.4M."
+GOT_IT = f'Claude: Got it, Dana Ruiz – "{QUESTION}" Working on it.'
+
+
+def record_chat(bot):
+    """The meeting chat, in posting order."""
+    chat = []
+
+    async def post(t): chat.append(t)
+    bot.post_chat = post
+    return chat
+
+
+def answer_instantly(bot):
+    if bot.agent:
+        async def ask(transcript, asker, q): return ANSWER, [], 0.0     # never yields to the loop
+        bot.agent.ask = ask
+    else:
+        fake_client(bot, [], [ANSWER])
+
+
+async def finish_spawned():
+    """Let everything the bot spawned (answers, acknowledgements) run to the end."""
+    while tasks := [t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()]:
+        await asyncio.wait(tasks)
+
+
+def hear(bot, question=QUESTION, speaker="Dana Ruiz"):
+    """The bot hears a question in the meeting and handles it to the end."""
+    async def meeting():
+        now = tb.time.monotonic()
+        bot.dispatch({"speaker": speaker, "text": question, "t": now, "started": now})
+        await finish_spawned()
+    asyncio.run(meeting())
+
+
+@pytest.mark.parametrize("extra", [(), ("--no-agent",)], ids=["agent", "no-agent"])
+def test_heard_question_is_acknowledged_before_the_answer(tmp_path, extra):
+    bot = make_bot(tmp_path, *extra)
+    chat = record_chat(bot)
+    answer_instantly(bot)
+    hear(bot)
+    assert chat == [GOT_IT, "Claude: " + ANSWER]
+
+
+def test_acknowledgement_is_in_chat_while_the_agent_works(tmp_path):
+    bot = make_bot(tmp_path)
+    chat, seen_while_working = record_chat(bot), []
+
+    async def ask(transcript, asker, q):
+        await asyncio.sleep(0.05)
+        seen_while_working.extend(chat)
+        return ANSWER, [], 0.0
+    bot.agent.ask = ask
+    hear(bot)
+    assert seen_while_working == [GOT_IT]
+
+
+def test_long_question_is_shortened_in_the_acknowledgement(tmp_path):
+    bot = make_bot(tmp_path)
+    chat = record_chat(bot)
+    answer_instantly(bot)
+    q = "walk us through " + "the vendor consolidation plan and the network refresh " * 5
+    hear(bot, q, "Mark Chen")
+    assert chat[0].startswith('Claude: Got it, Mark Chen – "')
+    heard = chat[0].split('"')[1]
+    assert len(heard) <= 120 and heard.endswith("...") and q.startswith(heard[:-3])
+
+
+def test_asker_is_told_when_no_answer_comes(tmp_path):
+    bot = make_bot(tmp_path, "--no-agent")
+    chat = record_chat(bot)
+
+    async def create(**kw): raise RuntimeError("model unreachable")
+    bot.client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    hear(bot)
+    assert chat == [GOT_IT, "Claude: Sorry, Dana Ruiz – I couldn't get an answer just now."]
+
+
+@pytest.mark.parametrize("limit", ["Reached maximum budget ($2)", "Reached maximum number of turns (12)",
+                                   "agent timed out"])
+def test_a_tripped_limit_still_gets_an_answer(tmp_path, limit):
+    """Per-question limits only stop the agent's file search: the asker still gets an answer."""
+    bot = make_bot(tmp_path)
+    chat = record_chat(bot)
+
+    async def ask(transcript, asker, q): raise RuntimeError(limit)
+
+    async def complete(transcript, task, timeout=None, budget=None): return ANSWER
+    bot.agent.ask, bot.agent.complete = ask, complete
+    hear(bot)
+    assert chat == [GOT_IT, "Claude: " + ANSWER]
+
+
+def test_summary_and_wrap_up_get_their_own_spend_limit(tmp_path):
+    bot = make_bot(tmp_path)
+    record_chat(bot)
+    budgets = []
+
+    async def complete(transcript, task, timeout=None, budget=None):
+        budgets.append(budget)
+        return "## Summary\nDone."
+    bot.agent.complete = complete
+    bot.add_line("Dana Ruiz", "We approved the network refresh.")
+    asyncio.run(bot.summarize(to_chat=True))
+    assert budgets == [tb.SUMMARY_BUDGET_USD] * 2 and tb.SUMMARY_BUDGET_USD > 2.0
+
+
+def test_acknowledgement_can_be_turned_off(tmp_path):
+    bot = make_bot(tmp_path, "--no-ack")
+    chat = record_chat(bot)
+    answer_instantly(bot)
+    hear(bot)
+    assert chat == ["Claude: " + ANSWER]
+
+
+def test_operator_chat_question_gets_no_acknowledgement(tmp_path):
+    bot = make_bot(tmp_path, "--no-agent")
+    chat = record_chat(bot)
+    answer_instantly(bot)
+    bot.listening = True
+
+    async def run():
+        await bot.handle_command(f"/chat {QUESTION}")
+        await finish_spawned()
+    asyncio.run(run())
+    assert chat == ["Claude: " + ANSWER]

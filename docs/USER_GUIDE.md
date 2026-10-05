@@ -21,8 +21,8 @@ section [For attendees](#for-attendees). Installation and tenant setup are in th
    Claude searches these files and cites them by name. The folder can be anywhere on the PC. If you
    keep it inside the bot's folder, put it under `materials\`, which git ignores.
 2. **Run Check setup.** Open the app, choose the knowledge folder and click **Check setup**. Every line
-   should read PASS. The agent line should list the files it found and any MCP tools. The check makes a
-   few small billed model calls.
+   should read PASS, including **Agent engine pinned**. The agent line should list the files it found
+   (and MCP tools, if your admin added any). The check makes a few small billed model calls.
 3. **Refresh the bot's sign-in if it is more than about a week old.** Run `.\run.ps1 -Login` and sign in
    as the bot account (see the [Admin Guide](ADMIN_GUIDE.md#bot-account-and-sign-in)).
 4. **Do a dry run before an important meeting.** Hold a five-minute test meeting. Ask one question about
@@ -35,7 +35,7 @@ Open **Claude-Teams-Bot** from the Desktop or the Start menu. The **Control** ta
 | Field | What to enter |
 |---|---|
 | **Meeting link** | The Teams join link (starts with `https://teams.microsoft.com/`). A link that isn't a Teams link is flagged under the field. |
-| **Bot name** | How the bot appears when it joins as a guest. Pre-filled "Claude Meeting Assistant"; **Reset** restores it. Teams accepts letters, numbers, spaces and `- ' . _ @`. When the bot is signed in as its own account, Teams shows that account's name instead. |
+| **Bot name** | How the bot appears when it joins as a guest. Pre-filled "Claude Meeting Assistant"; leave it empty to go back to that. Teams accepts letters, numbers, spaces and `- ' . _ @`. When the bot is signed in as its own account, Teams shows that account's name instead. |
 | **Knowledge folder** | The meeting's folder (**Browse…**). If you leave the default (`agent\project`), Claude answers from the fictional sample files. |
 | **Speak answers** | **When asked**: speaks only when a question says "out loud". **Always**: speaks every answer. **Off**: chat only. |
 
@@ -68,11 +68,18 @@ When the bot is ready, it posts this notice in the meeting chat:
 - **Ask out loud.** Start with "Hey Claude", for example "Hey Claude, what's the Q4 capex number?".
   "Hi Claude" and "OK Claude" also work, and so does starting a sentence with "Claude, ...". Caption
   mishearings such as "Hey cloud" are recognized. A plain mention of "the cloud" is not.
-- **Finish your thought.** Claude answers once you have been quiet for about 2 seconds, or sooner when
-  your question ends with a question mark in the captions. A pause in the middle of a question is fine.
-- **Read the answer in the chat.** Answers appear in the meeting chat, usually within 4 to 8 seconds.
-  Longer ones get a "working on it" note first. Answers cite their source, for example
-  `(source: q4_it_budget_brief.md)`.
+- **Finish your thought.** Claude takes the question once you have been quiet for about 2 seconds, or
+  sooner when your question ends with a question mark in the captions. A pause in the middle of a
+  question is fine.
+- **Watch for "Got it".** As soon as Claude takes your question, the chat shows it as the captions heard
+  it:
+
+  > Claude: Got it, Dana Ruiz – "what's the Q4 capex number?" Working on it.
+
+  If the quoted question is wrong, the captions misheard you. Ask again.
+- **Read the answer in the chat.** The answer follows, usually within 4 to 8 seconds. It cites its
+  source, for example `(source: q4_it_budget_brief.md)`. If Claude can't reach its model, it says so
+  in the chat ("Sorry, … I couldn't get an answer just now").
 - **Hear it.** Add "out loud", "aloud" or "tell us" to the question, for example "Hey Claude, tell us
   out loud who owns the network refresh". The bot speaks the first one or two sentences. The full
   answer still goes to the chat.
@@ -101,8 +108,8 @@ When Teams shows something the bot can't handle on its own, the status turns amb
 an **Action needed** banner says what to click and where. The app switches to the Meeting view when the
 step is there. Do that one click (or type), and the bot carries on.
 
-If you would rather watch the bot's browser directly, tick **Show the bot's browser in its own window
-(troubleshooting)** on the Control tab before joining.
+To troubleshoot in a real browser window (live view and DevTools), join with
+[`run.ps1`](#running-from-the-command-line) instead of the app.
 
 ## Ending the meeting
 
@@ -160,11 +167,12 @@ Ctrl+C also writes the transcript and summary, but posts no wrap-up.
 |---|---|
 | Status stays "In the lobby" | Admit "Claude Meeting Assistant" (or the bot account) in Teams. The bot gives up after 20 minutes. A signed-in bot account from your own organization usually skips the lobby. |
 | **Needs you** / Action needed | Follow the banner: do the one click in the Meeting view. |
-| Nobody gets an answer | 1. Check that Activity shows captions arriving. If it doesn't, live captions are off or not allowed for the bot (see the Admin Guide). 2. Check that the question started with "Hey Claude". 3. Tick **Show technical details** and look for the question line. |
+| No "Got it" after a question | The bot didn't take the question. 1. Check that Activity shows captions arriving. If it doesn't, live captions are off or not allowed for the bot (see the Admin Guide). 2. Check that the question started with "Hey Claude". 3. Tick **Show technical details** and look for "wake phrase heard". |
+| "Got it", but no answer | The model is slow or unreachable. A "Sorry … couldn't get an answer" note means every model path failed. Run **Check setup** after the meeting. |
 | The answer ignores the meeting's files | Make sure the Knowledge folder points at the meeting's folder, not the default sample folder. When the bot starts, Activity shows "Preparing the knowledge folder…" and then "Knowledge folder ready". |
 | A file is never cited | Scanned PDFs (pages that are only pictures) can't be searched, and password-protected files can't be read. Activity names such files when the bot first sees them. Use a text-based copy. |
 | No voice | Check that Speak answers is not **Off** and that the question said "out loud". Run **Check setup**: the Azure AI Speech line must pass. The bot waits until nobody has spoken for 1.5 seconds before it speaks. |
 | The room hears an echo | The bot never plays the meeting's audio on its PC. Make sure nobody started it with `--hear-meeting`. |
 | The bot joins as a guest instead of as its account, or stops at a Microsoft sign-in page | The saved sign-in is missing (**Check setup** shows "Saved sign-in … absent") or has expired. Run `.\run.ps1 -Login` to sign the bot account in again. |
-| **Check setup** shows FAIL lines | Fix each FAIL line. Its text says what is missing: the API key, the Foundry settings, the Chromium install (`setup.ps1`) or the Speech resource. |
+| **Check setup** shows FAIL lines | Fix each FAIL line. Its text says what is missing: the API key, the Foundry settings, the Speech resource, or the Chromium install or agent engine (for those two, run `setup.ps1` again). |
 | Stopped with an error | Click **Open meeting files**, then send `bot_*.log` and the `bot_debug\` folder to your administrator. Teams UI changes are the usual cause (see [When Teams changes its UI](ADMIN_GUIDE.md#when-teams-changes-its-ui)). |

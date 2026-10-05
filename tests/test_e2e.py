@@ -73,14 +73,14 @@ def run_meeting(tmp_path, agent_behavior, extra=(), state=None, during=None):
     async def main():
         url = "file://" + os.path.join(HERE, "mock_teams.html")
         args = tb.parse_args(["--url", url, "--guest", "--headless", "--end-check", "1",
-                              "--ack-after", "1", "--outdir", str(tmp_path), *extra])
+                              "--outdir", str(tmp_path), *extra])
         bot = Bot(args)
 
         async def fake_ask(transcript, asker, question):
             agent_calls.append((asker, question, transcript))
             return await agent_behavior(transcript, asker, question)
 
-        async def fake_complete(transcript, task, timeout=None):
+        async def fake_complete(transcript, task, timeout=None, budget=None):
             CALLS.append(task)                 # summaries + fallback answers (no tools)
             return f"DIRECT[{task[:40]}]"
         bot.agent.ask = fake_ask
@@ -106,18 +106,11 @@ def test_agent_answers_post_to_chat(tmp_path):
     assert "Mark Chen: I'll own the vendor renegotiation" in calls[0][2]   # transcript passed
     answers = [m for m in chat if m.startswith("Claude: AGENT")]
     assert len(answers) == 2 and "q4_it_budget_brief.md" in answers[0]
-    assert not any(m.startswith("Claude: working on") for m in chat)       # fast -> no ack
+    for asker, question in [c[:2] for c in calls]:                          # "Got it" first
+        got_it = chat.index(f'Claude: Got it, {asker} – "{question}" Working on it.')
+        assert got_it < chat.index(next(m for m in answers if f"for {asker} " in m))
     assert not [c for c in CALLS if "asks:" in c]                          # no fallback used
     assert os.path.exists(bot.path.replace("transcript", "summary"))
-
-
-def test_slow_agent_gets_ack_in_chat(tmp_path):
-    async def agent(transcript, asker, question):
-        await asyncio.sleep(2)
-        return "AGENT slow answer", ["mcp__microsoft-learn__microsoft_docs_search"], 0.05
-    _, chat, _ = run_meeting(tmp_path, agent)
-    assert any(m == "Claude: working on Dana Ruiz's question..." for m in chat)
-    assert sum(m == "Claude: AGENT slow answer" for m in chat) == 2
 
 
 def test_agent_failure_falls_back_to_transcript_answer(tmp_path):

@@ -12,8 +12,10 @@ summary when the meeting ends.
 - **Listens through live captions.** The bot reads Teams captions and speaker names straight from the
   meeting window. It needs no audio capture, speech-to-text service or Teams bot registration.
 - **Answers in the meeting chat.** Anyone can say "Hey Claude, what did we decide about the vendor
-  shortlist?". The answer appears in the chat within seconds. If an answer takes longer than 8 seconds,
-  the bot posts a "working on it" note first.
+  shortlist?".
+  - About 2 seconds after the asker stops talking, the chat shows `Got it` with the question as the
+    captions heard it. That confirms Claude is working on it and shows any mishearing straight away.
+  - The answer follows within seconds.
 - **Grounds answers in your material.** A Claude agent can search the meeting's documents (PDF, Word,
   PowerPoint, Excel, text) and any MCP servers you connect. It cites its sources and points out when
   something said in the meeting conflicts with a document.
@@ -37,10 +39,11 @@ Teams web client (Chromium driven by Playwright, signed in as the bot account)
                                                            │
                     Claude Agent SDK ◄─────────────────────┘
                       system prompt:  agent/instructions.md
-                      tools:          Read / Grep / Glob on the meeting's materials folder (read-only)
-                      MCP:            servers listed in agent/mcp.json
-                      guard rails:    tool allow-list, no permission prompts, strict MCP config,
-                                      per-question $ / turn / time caps
+                      tools:          Read / Grep / Glob, confined to the meeting's materials folder
+                      MCP:            none by default; servers you add to agent/mcp.json
+                      guard rails:    no permission prompts (anything else is refused), strict MCP
+                                      config, pinned engine, no session copies on disk,
+                                      per-question $ / turn / time limits that fall back, never stop
                            │
                            ├──► answer typed into the meeting chat
                            └──► optional: Azure AI Speech ──► spoken into the meeting
@@ -49,10 +52,11 @@ Teams web client (Chromium driven by Playwright, signed in as the bot account)
 - **No bot infrastructure.** The bot drives the Teams web client the way a person would. It needs no
   Azure Bot registration, no Graph media SDK and no third-party meeting-bot vendor.
 - **A locked-down agent.** Each question runs one fresh agent session. The agent can only read and
-  search the materials folder and call the MCP servers you list. It has no shell, file-write or web
-  tools.
-- **Always an answer.** If the agent fails (MCP down, timeout, budget cap), the bot answers again from
-  the transcript alone.
+  search the materials folder and call the MCP servers you list (none by default). Reads anywhere else
+  on the PC are refused. It has no shell, file-write or web tools, and it keeps no copy of the meeting.
+- **Always an answer.** If the agent fails or hits a per-question limit (MCP down, timeout, spend or
+  turn limit), the bot answers again from the transcript alone. No limit stops the bot for the rest of
+  the meeting; the log shows the running spend instead.
 - **Help with UI changes.** If a Teams UI step fails, the bot saves a screenshot and HTML for diagnosis
   and asks the operator to do that one click in the Meeting view.
 
@@ -62,7 +66,7 @@ Teams web client (Chromium driven by Playwright, signed in as the bot account)
 |---|---|---|
 | Claude (Anthropic API, or Microsoft Foundry in your Azure subscription) | The transcript so far, the question, and the file excerpts and MCP results the agent reads | Each question, plus the summary at the end |
 | Azure AI Speech | The text of the answer to be spoken | Only when an answer is spoken |
-| MCP servers in `agent/mcp.json` | The queries the agent sends them | Only when a question needs them |
+| MCP servers in `agent/mcp.json` (none by default) | The queries the agent sends them | Only when a question needs them |
 | Microsoft Teams | Chat messages, plus audio while the bot speaks | During the meeting |
 
 Transcripts, summaries, logs and the bot's saved sign-in stay on the meeting PC, under `meetings\`.
@@ -95,7 +99,7 @@ Then, in the same folder:
 
 ```powershell
 .\run.ps1 -Login     # sign in once as the bot's Teams account (saves teams_auth.json)
-.\run.ps1 -Check     # preflight: browser, model, agent, MCP, voice (makes a few small billed calls)
+.\run.ps1 -Check     # preflight: browser, model, pinned agent engine, MCP, voice (a few small billed calls)
 ```
 
 Open **Claude-Teams-Bot** from the Start menu, paste a Teams join link and click **Join meeting**.
@@ -105,7 +109,7 @@ Open **Claude-Teams-Bot** from the Start menu, paste a Teams join link and click
 | Guide | For | Covers |
 |---|---|---|
 | [User Guide](docs/USER_GUIDE.md) | The person running the bot in a meeting | Before, during and after a meeting, the desktop app, voice, private questions, troubleshooting |
-| [Admin Guide](docs/ADMIN_GUIDE.md) | Whoever deploys it in a tenant | Teams prerequisites, bot account, model provider, Speech, knowledge folders, MCP servers, cost caps, security and data handling, every command-line option, maintenance |
+| [Admin Guide](docs/ADMIN_GUIDE.md) | Whoever deploys it in a tenant | Teams prerequisites, bot account, model provider, Speech, knowledge folders, MCP servers, cost controls, security and data handling, every command-line option, maintenance |
 | [CLAUDE.md](CLAUDE.md) | Developers (and Claude Code) | Internals: process model, bot pipeline, agent lock-down, prompts, tests |
 
 ## Repository layout
@@ -115,7 +119,8 @@ Open **Claude-Teams-Bot** from the Start menu, paste a Teams join link and click
 | `teams_meeting_bot.py` | The bot: browser automation, captions, wake phrase, agent, voice, summary, CLI |
 | `app.py`, `app_style.py` | Windows desktop app (tkinter) that runs the bot and shows its activity |
 | `agent/instructions.md` | The agent's system prompt: role, answer rules, boundaries |
-| `agent/mcp.json` | MCP servers the agent may call (Claude Code format); ships with Microsoft Learn |
+| `agent/mcp.json` | MCP servers the agent may call (Claude Code format); empty by default |
+| `agent/mcp.example.json` | A sample entry (Microsoft Learn's public docs server) to copy into `mcp.json` |
 | `agent/project/` | Sample meeting materials (fictional), used when no knowledge folder is chosen |
 | `run.ps1` | Command-line launcher: preflight, sign-in, join |
 | `setup.ps1`, `install_shortcut.ps1`, `requirements.txt` | Install |
@@ -125,7 +130,7 @@ Open **Claude-Teams-Bot** from the Start menu, paste a Teams join link and click
 ## Testing
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q                                        # full suite, ~5-6 min
+.\.venv\Scripts\python.exe -m pytest -q                                        # full suite, ~4-5 min
 .\.venv\Scripts\python.exe -m pytest -q tests/test_unit.py tests/test_app.py   # fast loop, seconds
 ```
 
@@ -134,13 +139,17 @@ The suite makes no model calls. It covers:
 - caption finalization;
 - join-link rewriting;
 - the agent lock-down and the Foundry model pinning;
+- the agent engine itself: `tests/test_engine.py` runs the pinned engine against a local fake model and
+  checks that reads outside the folder are refused, `@file` text in captions isn't expanded, no
+  session copy is written, and the turn and spend limits end a run;
+- a tripped limit still getting the asker an answer;
 - Office and PDF conversion;
 - keeping private questions out of the meeting;
 - the desktop app's activity feed.
 
 `tests/test_e2e.py` runs whole meetings in headless Chromium against `tests/mock_teams.html`, a mock
-that reproduces real Teams quirks. Those runs cover the lobby, captions, answers, the slow-agent note,
-the agent-failure fallback and the end of the meeting. One GUI end-to-end test makes real model calls
+that reproduces real Teams quirks. Those runs cover the lobby, captions, the "Got it" note before each
+answer, the agent-failure fallback and the end of the meeting. One GUI end-to-end test makes real model calls
 and runs only when `RUN_GUI_TESTS=1` is set.
 
 ## Known limits

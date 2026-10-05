@@ -105,9 +105,11 @@ def bot_python():
     return exe
 
 
-def build_command(link, name, kb, voice, outdir, python=None, browser="embedded"):
+def build_command(link, name, kb, voice, outdir, python=None):
+    """The bot's browser runs off-screen and shows in the Meeting view. For a real browser
+    window (troubleshooting, DevTools), run the bot with run.ps1 instead."""
     cmd = [python or bot_python(), "-u", BOT, "--url", link, "--name", name,
-           "--voice", voice, "--outdir", outdir, "--browser", browser]
+           "--voice", voice, "--outdir", outdir, "--browser", "embedded"]
     if kb:
         cmd += ["--project", kb]
     return cmd
@@ -262,7 +264,6 @@ class App:
         self.voice = tk.StringVar(value=voice if voice in VOICE_CHOICES else next(iter(VOICE_CHOICES)))
         self.status = tk.StringVar(value="Ready")
         self.ask_text = tk.StringVar()
-        self.show_window = tk.BooleanVar(value=s.get("show_window", False))
         self.show_details = tk.BooleanVar(value=s.get("show_details", False))
         self.type_text = tk.StringVar()
         self.frame_mtime = 0
@@ -379,8 +380,7 @@ class App:
 
         self.link_entry = field(0, "Meeting link", self.link)
         self.link_help = help_text(1, LINK_HELP)
-        self.reset_btn = ttk.Button(body, text="Reset", command=lambda: self.name.set(DEFAULT_NAME))
-        self.name_entry = field(2, "Bot name", self.name, self.reset_btn)
+        self.name_entry = field(2, "Bot name", self.name)
         help_text(3, "How the bot appears in the meeting. Letters, numbers, spaces and - ' . _ @")
         self.browse_btn = ttk.Button(body, text="Browse\u2026", command=self.browse)
         self.kb_entry = field(4, "Knowledge folder", self.kb, self.browse_btn)
@@ -407,12 +407,8 @@ class App:
         self.join_btn.grid(row=0, column=0)
         self.check_btn = ttk.Button(actions, text="Check setup", command=self.check)
         self.check_btn.grid(row=0, column=1, padx=(px(8), 0))
-        self.window_chk = ttk.Checkbutton(actions, text="Show the bot's browser in its own window "
-                                          "(troubleshooting)", variable=self.show_window,
-                                          style="Card.TCheckbutton")
-        self.window_chk.grid(row=0, column=3, sticky="e")
-        self.form_inputs = [self.link_entry, self.name_entry, self.reset_btn, self.kb_entry,
-                            self.browse_btn, *self.voice_buttons, self.window_chk]
+        self.form_inputs = [self.link_entry, self.name_entry, self.kb_entry,
+                            self.browse_btn, *self.voice_buttons]
 
         # While a meeting runs, the form collapses to this summary and the Leave button.
         self.summary_row = ttk.Frame(c, style="Card.TFrame")
@@ -702,15 +698,13 @@ class App:
         if not v:
             return
         link, name, kb, voice = v
-        self.remember(link=link, name=name, kb=kb, voice=self.voice.get(),
-                      show_window=self.show_window.get())
+        self.remember(link=link, name=name, kb=kb, voice=self.voice.get())
         self.outdir = os.path.join(HERE, "meetings", dt.datetime.now().strftime("%Y-%m-%d_%H%M"))
         self.append(f"Starting: {name} -> meeting; knowledge folder: {kb or '(none)'}; "
                     f"voice: {voice}", "app")
         self.frame_mtime, self.layout = 0, None
         self.draw_view_placeholder()
-        self.launch(build_command(link, name, kb, voice, self.outdir, self.python,
-                                  browser="window" if self.show_window.get() else "embedded"))
+        self.launch(build_command(link, name, kb, voice, self.outdir, self.python))
 
     def check(self):
         if self.proc:

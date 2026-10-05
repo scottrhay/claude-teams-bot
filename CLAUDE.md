@@ -18,7 +18,7 @@ PowerShell, from this folder, always through the venv interpreter:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\setup.ps1          # one-time: .venv (Python 3.11), deps, Chromium
-.\.venv\Scripts\python.exe -m pytest -q                       # full suite: offline, no model calls, ~5.5 min
+.\.venv\Scripts\python.exe -m pytest -q                       # full suite: offline, no model calls, ~4.5 min
 .\.venv\Scripts\python.exe -m pytest -q tests/test_unit.py tests/test_app.py   # fast loop (skips e2e), seconds
 .\.venv\Scripts\python.exe -m pytest -q tests/test_unit.py::test_wake_phrase_negatives
 .\.venv\Scripts\python.exe teams_meeting_bot.py --help        # every bot flag and its default
@@ -102,8 +102,11 @@ One file, top-down: selectors, injected JS, prompts, helpers, `MeetingAgent`, `M
    match) within 30 s.
 5. **Answering** (`answer`) never leaves the meeting without a reply: the agent with tools, then on any
    error `claude()`, which tries the agent without tools and then the direct Messages API (`make_client`).
-   "Say that out loud" (`REPEAT_ASK`) replays `last_answer` with no model call. A "working on it" note
-   posts after `--ack-after` seconds. Every answer is appended to `self.transcript` as a `Claude:` line;
+   "Say that out loud" (`REPEAT_ASK`) replays `last_answer` with no model call. A question `dispatch`
+   took from the captions (`heard=True`; not `/chat`, not private) first gets `acknowledge`: "Got it,
+   <asker> – "<question as heard>" Working on it." (`--no-ack` turns it off). It runs as a task beside
+   the model call; the reply awaits it, so it always posts first, and if every model path fails the asker
+   gets a "Sorry" note instead of silence. Every answer is appended to `self.transcript` as a `Claude:` line;
    that list is the bot's only memory, re-sent with each question and the input to the summary.
    `memory(private)` builds what the model sees: private Q&A (`to_chat=False`: plain console text, the
    app's "Ask privately") goes to `operator_private_*.md` instead of the transcript file and reaches only
@@ -123,9 +126,20 @@ operator, unless `--headless`). `robust_click` clears overlays, then retries nor
 ### The agent (`MeetingAgent`, Claude Agent SDK)
 
 One fresh `query()` per question, locked down: built-in tools only Read/Grep/Glob; `cwd` = the materials
-folder (`--project`, default `agent/project/`); `allowed_tools` = those plus `mcp__<name>` for each server
-in `agent/mcp.json`; `strict_mcp_config=True`; `permission_mode="dontAsk"`; `setting_sources=[]` (no user or
-global Claude Code settings); caps from `--agent-budget`, `--agent-max-turns`, `--agent-timeout`. Under
+folder (`--project`, default `agent/project/`); `allowed_tools` = only `mcp__<name>` for each server in
+`agent/mcp.json` (none ships enabled; `agent/mcp.example.json` is the sample). The built-ins get no allow
+rule on purpose: reads inside `cwd` need none, and a bare `Read` rule matches every file on the PC, so
+`permission_mode="dontAsk"` refuses reads elsewhere. `strict_mcp_config=True`; `setting_sources=[]` (no user
+or global Claude Code settings); `verbatim_prompts=True` (an `@path` in caption text is not expanded into the
+file); `--no-session-persistence` (no session copy under `~/.claude/projects`); `cli_path=bundled_engine()`
+(the claude.exe inside the pinned SDK wheel, see `requirements.txt`, not PATH's). Per-question limits from
+`--agent-budget` (USD 2.00), `--agent-max-turns`, `--agent-timeout`; the summary and wrap-up get
+`SUMMARY_BUDGET_USD`. A tripped limit raises and `answer()` falls back, so a limit never silences the bot.
+There is no meeting or monthly limit by design: `MeetingAgent.spent` (the engine's cost estimates, failed
+runs included) is logged after each answer and at the end. A model name the engine doesn't know (newer
+than the engine, or a custom Foundry deployment name) is priced at a default rate (2x its Sonnet 5 rate)
+and makes it print `[claude-code:unrecognized_model]` on stderr; `stderr=engine_note` turns engine
+stderr into log details, since bare lines would show in the app's feed. Under
 Foundry, `_env` pins every internal model role to the one deployment. `prepare_materials` (every start)
 copies the text of .docx/.pptx/.xlsx/.pdf files into `_converted_text/` inside the materials folder: Read
 can't open Office files, and Grep can't see inside PDFs (compressed streams). Each copy carries its
@@ -182,6 +196,12 @@ clicks, a JS confirm dialog, captions that grow word by word); update it with an
   No error"). The GUI end-to-end test is skipped unless `RUN_GUI_TESTS=1` and makes real model calls.
 - `test_agent_options_are_locked_down` reads the real `agent/mcp.json` and `instructions.md`: adding an MCP
   server or dropping the phrase "AI meeting assistant for the leadership team" means updating it.
+- `test_engine.py` checks what the lock-down settings actually do, by running the real pinned claude.exe
+  against `FakeModel`: a local HTTP server that speaks the Messages API (streamed) and plays scripted tool
+  calls, with `CLAUDE_CONFIG_DIR` in a temp folder. Only the three tools are offered, a read outside the
+  folder is denied, `@path` is not expanded, no session copy is written, the turn and spend limits end a
+  run with an error (also for an unpriced deployment name), and engine stderr arrives through
+  `engine_note`. No model calls, about 10 s. An engine upgrade means re-running it.
 
 ## Runtime files
 
